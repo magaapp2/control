@@ -1,0 +1,227 @@
+name: Perpetual Dual Stream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+concurrency:
+  group: streaming-group
+  cancel-in-progress: true
+
+env:
+  ENABLE_STREAM: 1
+
+jobs:
+  stream:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🧹 Delete Old Logs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 1
+
+      - name: System Setup
+        run: |
+          echo "1. Updating Repositories..."
+          sudo apt-get update -y
+          
+          echo "2. Installing Packages..."
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends xvfb ffmpeg pulseaudio unclutter xdotool curl
+          
+          echo "3. Setting up Audio..."
+          pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
+          pactl load-module module-null-sink sink_name=Sink1
+
+      - name: Python Setup
+        run: pip install -U urllib3 chardet requests selenium pyvirtualdisplay
+
+      - name: Create Python Script
+        run: |
+          cat << 'EOF' > main.py
+          import os, subprocess, time, requests, signal, urllib.parse
+          from pyvirtualdisplay import Display
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+
+          # رابط قاعدة بيانات فايربيس الخاصة بك
+          FIREBASE_URL = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control.json"
+
+          def get_firebase_data():
+              try:
+                  res = requests.get(FIREBASE_URL, timeout=5)
+                  return res.json() or {}
+              except Exception as e:
+                  print(f"Error fetching Firebase: {e}")
+                  return {}
+
+          def kill_all(signum, frame):
+              os._exit(0)
+
+          signal.signal(signal.SIGTERM, kill_all)
+          signal.signal(signal.SIGINT, kill_all)
+
+          def main():
+              # تحديث حالة الجلسة في فايربيس لتصبح شغالة
+              try:
+                  requests.patch(FIREBASE_URL, json={"session_active": True})
+              except:
+                  pass
+
+              sink_name = "Sink1"
+              os.environ['PULSE_SINK'] = sink_name
+              
+              disp = Display(visible=0, size=(720, 1280), backend='xvfb')
+              disp.start()
+              os.environ['DISPLAY'] = f":{disp.display}"
+              
+              subprocess.Popen(['unclutter', '-idle', '0', '-display', f":{disp.display}"])
+              
+              opts = Options()
+              opts.add_argument('--no-sandbox')
+              opts.add_argument('--disable-dev-shm-usage')
+              opts.add_argument('--autoplay-policy=no-user-gesture-required')
+              opts.add_argument('--window-size=720,1280')
+              opts.add_argument('--kiosk')
+              
+              driver = webdriver.Chrome(options=opts)
+              driver.set_window_size(720, 1280)
+
+              ffmpeg_proc = None
+              fan_process = None
+              last_url = ""
+              script_triggered = False
+
+              print("🟢 جيت هب بدأ الاستماع لأوامر لوحة التحكم لحظياً...")
+
+              try:
+                  while True:
+                      # جلب البيانات من فايربيس
+                      data = get_firebase_data()
+                      streaming_active = data.get("streaming", False)
+                      game_url = data.get("game_url", "")
+                      stream_key = data.get("stream_key", "")
+                      script_url = data.get("script_url", "")
+
+                      # 1. فتح رابط النشر (Google Apps Script) أول مرة إذا كان موجوداً
+                      if script_url and not script_triggered:
+                          try:
+                              separator = "&" if "?" in script_url else "?"
+                              trigger_url = f"{script_url}{separator}nocache={int(time.time())}"
+                              print(f"🔗 فتح رابط النشر (Google Apps Script): {trigger_url}")
+                              driver.get(trigger_url)
+                              time.sleep(10)
+                              script_triggered = True
+                          except Exception as e:
+                              print(f"Error triggering script url: {e}")
+
+                      # 2. تحديث رابط اللعبة لحظياً إذا غيره المستخدم في الصفحة
+                      if game_url and game_url != last_url and script_triggered:
+                          print(f"🔄 جاري الانتقال لرابط اللعبة الجديد: {game_url}")
+                          try:
+                              driver.get(game_url)
+                              last_url = game_url
+                              time.sleep(5)
+                              os.system("xdotool key Tab Tab Tab Return")
+                          except Exception as e:
+                              print(f"Error loading game URL: {e}")
+
+                      # 3. تشغيل أو إيقاف بث FFmpeg بناءً على زر لوحة التحكم وشفرة البث
+                      if streaming_active and not ffmpeg_proc and stream_key:
+                          print("🚀 بدء بث FFmpeg إلى يوتيوب...")
+                          
+                          # صوت خلفية خفيف لمنع صمت البث
+                          fan_cmd = [
+                              'ffplay', '-f', 'lavfi', 
+                              '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', 
+                              '-nodisp', '-loop', '0', '-loglevel', 'quiet'
+                          ]
+                          fan_env = os.environ.copy()
+                          fan_env['PULSE_SINK'] = sink_name
+                          fan_process = subprocess.Popen(fan_cmd, env=fan_env)
+
+                          # أمر البث الأساسي عبر FFmpeg
+                          ffmpeg_cmd = [
+                              'ffmpeg', '-y',
+                              '-nostats', '-loglevel', 'error',
+                              '-f', 'x11grab',
+                              '-draw_mouse', '0',
+                              '-framerate', '60',
+                              '-video_size', '720x1280',
+                              '-i', f":{disp.display}",
+                              '-f', 'pulse',
+                              '-i', f"{sink_name}.monitor",
+                              '-c:v', 'libx264',
+                              '-preset', 'ultrafast',
+                              '-tune', 'zerolatency',
+                              '-b:v', '3000k',
+                              '-maxrate', '3000k',
+                              '-bufsize', '6000k',
+                              '-r', '60',
+                              '-g', '120',
+                              '-pix_fmt', 'yuv420p',
+                              '-c:a', 'aac',
+                              '-b:a', '128k',
+                              '-f', 'flv',
+                              f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
+                          ]
+                          ffmpeg_proc = subprocess.Popen(ffmpeg_cmd)
+
+                      elif not streaming_active and ffmpeg_proc:
+                          print("⏹️ تم إيقاف البث من لوحة التحكم.")
+                          if fan_process:
+                              fan_process.terminate()
+                          if ffmpeg_proc:
+                              ffmpeg_proc.terminate()
+                          ffmpeg_proc = None
+
+                      # الانتظار 3 ثوانٍ قبل فحص الأوامر الجديدة من فايربيس
+                      time.sleep(3)
+
+              except Exception as e:
+                  print(f"Error in main loop: {e}")
+              finally:
+                  if fan_process: fan_process.terminate()
+                  if ffmpeg_proc: ffmpeg_proc.kill()
+                  try:
+                      driver.quit()
+                  except:
+                      pass
+                  disp.stop()
+                  
+                  # تحديث الحالة في فايربيس بأن الجلسة توقفت
+                  try:
+                      requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False})
+                  except:
+                      pass
+                  print("🛑 انتهت جلسة البث تماماً.")
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+      - name: Run Streaming Script
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          ENABLE_STREAM: ${{ env.ENABLE_STREAM }}
+        run: python main.py
+
+      - name: 🔄 Trigger Next Session (Continuous Loop)
+        if: always()
+        run: |
+          echo "🔄 إعادة تشغيل الـ Workflow لاستمرار الجلسات..."
+          curl -s -X POST \
+            -H "Authorization: token ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches \
+            -d '{"ref":"main"}' || true
