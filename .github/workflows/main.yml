@@ -165,7 +165,7 @@ jobs:
                               '-map', '1:a',
                               
                               # فلتر السلاسة وتغطية أول 10% من أعلى الشاشة (128 بكسل) بلون أسود لمنع ظهور أي شريط غير مرغوب فيه
-                              '-vf', 'fps=60,drawbox=x=0:y=0:w=720:h=128:color=black:t=fill',
+                              '-vf', 'fps=60,drawbox=x=0:y=0:w=720:h=192:color=black:t=fill',
                               
                               '-c:v', 'libx264',
                               '-preset', 'ultrafast',
