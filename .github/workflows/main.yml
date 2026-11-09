@@ -2,8 +2,6 @@ name: Perpetual Dual Stream
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/30 * * * *'
 
 concurrency:
   group: streaming-group
@@ -227,13 +225,3 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           ENABLE_STREAM: ${{ env.ENABLE_STREAM }}
         run: python main.py
-
-      - name: 🔄 Trigger Next Session (Continuous Loop)
-        if: always()
-        run: |
-          echo "🔄 إعادة تشغيل الـ Workflow لاستمرار الجلسات..."
-          curl -s -X POST \
-            -H "Authorization: token ${{ github.token }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches \
-            -d '{"ref":"main"}' || true
