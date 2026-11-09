@@ -55,6 +55,9 @@ jobs:
           # رابط قاعدة بيانات فايربيس الخاصة بك
           FIREBASE_URL = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control.json"
 
+          # ⏱️ مدة الانتظار قبل بدء البث التلقائي (بالثواني)
+          AUTO_START_DELAY_SECONDS = 90
+
           def get_firebase_data():
               try:
                   res = requests.get(FIREBASE_URL, timeout=5)
@@ -99,6 +102,7 @@ jobs:
               fan_process = None
               last_url = ""
               script_triggered = False
+              auto_start_done = False  # ⏱️ هل تم تنفيذ البدء التلقائي؟
 
               print("🟢 جيت هب بدأ الاستماع لأوامر لوحة التحكم لحظياً...")
 
@@ -110,6 +114,23 @@ jobs:
                       game_url = data.get("game_url", "")
                       stream_key = data.get("stream_key", "")
                       script_url = data.get("script_url", "")
+                      session_active = data.get("session_active", False)
+                      start_time = data.get("start_time", 0)
+
+                      # ⏱️ البدء التلقائي للبث بعد 90 ثانية من start_time
+                      # يعمل فقط إذا: الجلسة نشطة + لم يبدأ البث بعد + لم يُنفَّذ البدء التلقائي سابقاً
+                      if (session_active and not streaming_active and not auto_start_done 
+                              and start_time and stream_key):
+                          elapsed = (time.time() * 1000) - start_time
+                          if elapsed >= AUTO_START_DELAY_SECONDS * 1000:
+                              print(f"⏱️ مرت {int(elapsed/1000)} ثانية منذ بدء الجلسة — تشغيل البث تلقائياً...")
+                              try:
+                                  requests.patch(FIREBASE_URL, json={"streaming": True})
+                                  streaming_active = True
+                                  print("✅ تم كتابة streaming=True في Firebase تلقائياً.")
+                              except Exception as e:
+                                  print(f"⚠️ فشل كتابة streaming في Firebase: {e}")
+                              auto_start_done = True
 
                       # 1. فتح رابط النشر (Google Apps Script) أول مرة إذا كان موجوداً
                       if script_url and not script_triggered:
