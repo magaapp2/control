@@ -58,6 +58,14 @@ jobs:
           # ⏱️ مدة الانتظار قبل بدء البث التلقائي (بالثواني)
           AUTO_START_DELAY_SECONDS = 90
 
+          # مراجع عالمية للعمليات حتى يستطيع kill_all إنهاءها فوراً
+          GLOBAL_REFS = {
+              "ffmpeg_proc": None,
+              "fan_process": None,
+              "driver": None,
+              "disp": None,
+          }
+
           def get_firebase_data():
               try:
                   res = requests.get(FIREBASE_URL, timeout=5)
@@ -66,11 +74,61 @@ jobs:
                   print(f"Error fetching Firebase: {e}")
                   return {}
 
+          def cleanup_processes():
+              """إنهاء FFmpeg و fan_process و driver و display بأمان."""
+              fp = GLOBAL_REFS.get("fan_process")
+              if fp:
+                  try:
+                      fp.terminate()
+                  except:
+                      pass
+              ff = GLOBAL_REFS.get("ffmpeg_proc")
+              if ff:
+                  try:
+                      ff.kill()
+                  except:
+                      pass
+              drv = GLOBAL_REFS.get("driver")
+              if drv:
+                  try:
+                      drv.quit()
+                  except:
+                      pass
+              dsp = GLOBAL_REFS.get("disp")
+              if dsp:
+                  try:
+                      dsp.stop()
+                  except:
+                      pass
+
           def kill_all(signum, frame):
+              """يُستدعى عند SIGTERM/SIGINT — تنظيف سريع ثم خروج فوري."""
+              print(f"⚠️ تم استلام إشارة ({signum}) — جاري التنظيف والخروج...")
+              cleanup_processes()
+              # محاولة إبلاغ Firebase بأن الجلسة توقفت (بمهلة قصيرة جداً)
+              try:
+                  requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False}, timeout=2)
+              except:
+                  pass
+              print("🛑 خروج فوري.")
               os._exit(0)
 
           signal.signal(signal.SIGTERM, kill_all)
           signal.signal(signal.SIGINT, kill_all)
+
+          def sleep_interruptible(seconds, data_check=True):
+              """
+              نوم قابل للمقاطعة: يفحص session_active كل ثانية.
+              إذا أصبحت false → يخرج من النوم فوراً ويعيد False.
+              يعيد True إذا اكتمل النوم بشكل طبيعي.
+              """
+              for _ in range(int(seconds)):
+                  time.sleep(1)
+                  if data_check:
+                      d = get_firebase_data()
+                      if not d.get("session_active", False):
+                          return False
+              return True
 
           def main():
               # تحديث حالة الجلسة في فايربيس لتصبح شغالة
@@ -84,6 +142,7 @@ jobs:
               
               disp = Display(visible=0, size=(720, 1280), backend='xvfb')
               disp.start()
+              GLOBAL_REFS["disp"] = disp
               os.environ['DISPLAY'] = f":{disp.display}"
               
               subprocess.Popen(['unclutter', '-idle', '0', '-display', f":{disp.display}"])
@@ -97,6 +156,7 @@ jobs:
               
               driver = webdriver.Chrome(options=opts)
               driver.set_window_size(720, 1280)
+              GLOBAL_REFS["driver"] = driver
 
               ffmpeg_proc = None
               fan_process = None
@@ -118,6 +178,12 @@ jobs:
                       start_time = data.get("start_time", 0)
                       end_time = data.get("end_time", 0)  # ⏳ وقت الإنهاء العشوائي
 
+                      # 🛑 إنهاء الجلسة إذا طلب المستخدم (session_active = false)
+                      # هذا الفحص يضمن الاستجابة السريعة حتى لو لم يصل SIGTERM بعد
+                      if not session_active:
+                          print("🛑 تم إيقاف الجلسة من لوحة التحكم — خروج فوري...")
+                          break
+
                       # ⏳ التحقق من انتهاء المدة العشوائية (1.5 - 2.3 ساعة) — إنهاء الجلسة
                       if session_active and end_time and (time.time() * 1000) >= end_time:
                           print("⏳ انتهت المدة العشوائية للجلسة — إيقاف البث وإنهاء الجلسة تلقائياً...")
@@ -125,16 +191,7 @@ jobs:
                               requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False})
                           except Exception as e:
                               print(f"⚠️ فشل إنهاء الجلسة في Firebase: {e}")
-                          # إنهاء العمليات والخروج
-                          if fan_process: fan_process.terminate()
-                          if ffmpeg_proc: ffmpeg_proc.kill()
-                          try:
-                              driver.quit()
-                          except:
-                              pass
-                          disp.stop()
-                          print("🛑 تم إنهاء الجلسة تلقائياً بسبب انتهاء المدة.")
-                          os._exit(0)
+                          break
 
                       # ⏱️ البدء التلقائي للبث بعد 90 ثانية من start_time
                       # يعمل فقط إذا: الجلسة نشطة + لم يبدأ البث بعد + لم يُنفَّذ البدء التلقائي سابقاً
@@ -158,7 +215,10 @@ jobs:
                               trigger_url = f"{script_url}{separator}nocache={int(time.time())}"
                               print(f"🔗 فتح رابط النشر (Google Apps Script): {trigger_url}")
                               driver.get(trigger_url)
-                              time.sleep(10)
+                              # نوم قابل للمقاطعة بدل time.sleep(10)
+                              if not sleep_interruptible(10):
+                                  print("🛑 تم إيقاف الجلسة أثناء انتظار Apps Script.")
+                                  break
                               script_triggered = True
                           except Exception as e:
                               print(f"Error triggering script url: {e}")
@@ -169,7 +229,10 @@ jobs:
                           try:
                               driver.get(game_url)
                               last_url = game_url
-                              time.sleep(5)
+                              # نوم قابل للمقاطعة بدل time.sleep(5)
+                              if not sleep_interruptible(5):
+                                  print("🛑 تم إيقاف الجلسة أثناء انتظار تحميل اللعبة.")
+                                  break
                               os.system("xdotool key Tab Tab Tab Return")
                           except Exception as e:
                               print(f"Error loading game URL: {e}")
@@ -187,6 +250,7 @@ jobs:
                           fan_env = os.environ.copy()
                           fan_env['PULSE_SINK'] = sink_name
                           fan_process = subprocess.Popen(fan_cmd, env=fan_env)
+                          GLOBAL_REFS["fan_process"] = fan_process
 
                           # أمر البث المحسن مع الـ Buffer وإخفاء 10% من أعلى الشاشة (يساوي 128 بكسل) لتغطيتها بأسود أو اقتصاصها
                           ffmpeg_cmd = [
@@ -226,23 +290,35 @@ jobs:
                               f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
                           ]
                           ffmpeg_proc = subprocess.Popen(ffmpeg_cmd)
+                          GLOBAL_REFS["ffmpeg_proc"] = ffmpeg_proc
 
                       elif not streaming_active and ffmpeg_proc:
                           print("⏹️ تم إيقاف البث من لوحة التحكم.")
                           if fan_process:
                               fan_process.terminate()
+                              fan_process = None
+                              GLOBAL_REFS["fan_process"] = None
                           if ffmpeg_proc:
                               ffmpeg_proc.terminate()
-                          ffmpeg_proc = None
+                              ffmpeg_proc = None
+                              GLOBAL_REFS["ffmpeg_proc"] = None
 
                       # الانتظار 3 ثوانٍ قبل فحص الأوامر الجديدة من فايربيس
-                      time.sleep(3)
+                      # نستخدم نوم قابل للمقاطعة بدل time.sleep(3)
+                      if not sleep_interruptible(3):
+                          print("🛑 تم إيقاف الجلسة أثناء الانتظار.")
+                          break
 
               except Exception as e:
                   print(f"Error in main loop: {e}")
               finally:
-                  if fan_process: fan_process.terminate()
-                  if ffmpeg_proc: ffmpeg_proc.kill()
+                  print("🧹 بدء التنظيف النهائي...")
+                  if fan_process: 
+                      try: fan_process.terminate()
+                      except: pass
+                  if ffmpeg_proc: 
+                      try: ffmpeg_proc.kill()
+                      except: pass
                   try:
                       driver.quit()
                   except:
@@ -251,7 +327,7 @@ jobs:
                   
                   # تحديث الحالة في فايربيس بأن الجلسة توقفت
                   try:
-                      requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False})
+                      requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False}, timeout=3)
                   except:
                       pass
                   print("🛑 انتهت جلسة البث تماماً.")
