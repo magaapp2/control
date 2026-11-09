@@ -208,20 +208,11 @@ jobs:
                                   print(f"⚠️ فشل كتابة streaming في Firebase: {e}")
                               auto_start_done = True
 
-                      # 1. فتح رابط النشر (Google Apps Script) أول مرة إذا كان موجوداً
+                      # 1. رابط النشر (Google Apps Script) — يُستدعى من HTML فقط
+                      # لا نستدعيه من هنا لتجنب إنشاء بث مزدوج وحذف البث الأصلي
                       if script_url and not script_triggered:
-                          try:
-                              separator = "&" if "?" in script_url else "?"
-                              trigger_url = f"{script_url}{separator}nocache={int(time.time())}"
-                              print(f"🔗 فتح رابط النشر (Google Apps Script): {trigger_url}")
-                              driver.get(trigger_url)
-                              # نوم قابل للمقاطعة بدل time.sleep(10)
-                              if not sleep_interruptible(10):
-                                  print("🛑 تم إيقاف الجلسة أثناء انتظار Apps Script.")
-                                  break
-                              script_triggered = True
-                          except Exception as e:
-                              print(f"Error triggering script url: {e}")
+                          print("ℹ️ تم تخطي استدعاء Apps Script (يُستدعى من HTML فقط).")
+                          script_triggered = True  # نعتبره مُنفَّذاً حتى لا تتكرر المحاولة
 
                       # 2. تحديث رابط اللعبة لحظياً إذا غيره المستخدم في الصفحة
                       if game_url and game_url != last_url and script_triggered:
