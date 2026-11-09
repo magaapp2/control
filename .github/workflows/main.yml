@@ -138,7 +138,7 @@ jobs:
 
                       # 3. تشغيل أو إيقاف بث FFmpeg بناءً على زر لوحة التحكم وشفرة البث
                       if streaming_active and not ffmpeg_proc and stream_key:
-                          print("🚀 بدء بث FFmpeg إلى يوتيوب...")
+                          print("🚀 بدء بث FFmpeg إلى يوتيوب مع إعدادات السلاسة وإخفاء الجزء العلوي...")
                           
                           # صوت خلفية خفيف لمنع صمت البث
                           fan_cmd = [
@@ -150,25 +150,37 @@ jobs:
                           fan_env['PULSE_SINK'] = sink_name
                           fan_process = subprocess.Popen(fan_cmd, env=fan_env)
 
-                          # أمر البث الأساسي عبر FFmpeg
+                          # أمر البث المحسن مع الـ Buffer وإخفاء 10% من أعلى الشاشة (يساوي 128 بكسل) لتغطيتها بأسود أو اقتصاصها
                           ffmpeg_cmd = [
                               'ffmpeg', '-y',
                               '-nostats', '-loglevel', 'error',
+                              '-thread_queue_size', '1024',
                               '-f', 'x11grab',
                               '-draw_mouse', '0',
                               '-framerate', '60',
                               '-video_size', '720x1280',
                               '-i', f":{disp.display}",
+                              '-thread_queue_size', '1024',
                               '-f', 'pulse',
                               '-i', f"{sink_name}.monitor",
+                              '-map', '0:v',
+                              '-map', '1:a',
+                              
+                              # فلتر السلاسة وتغطية أول 10% من أعلى الشاشة (128 بكسل) بلون أسود لمنع ظهور أي شريط غير مرغوب فيه
+                              '-vf', 'fps=60,drawbox=x=0:y=0:w=720:h=128:color=black:t=fill',
+                              
                               '-c:v', 'libx264',
                               '-preset', 'ultrafast',
                               '-tune', 'zerolatency',
+                              '-x264-params', 'threads=2:sliced-threads=1',
+                              '-max_muxing_queue_size', '1024',
                               '-b:v', '3000k',
                               '-maxrate', '3000k',
                               '-bufsize', '6000k',
                               '-r', '60',
                               '-g', '120',
+                              '-keyint_min', '120',
+                              '-sc_threshold', '0',
                               '-pix_fmt', 'yuv420p',
                               '-c:a', 'aac',
                               '-b:a', '128k',
