@@ -35,11 +35,24 @@ jobs:
           sudo apt-get update -y
           
           echo "2. Installing Packages..."
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends xvfb ffmpeg pulseaudio unclutter xdotool curl
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11
           
           echo "3. Setting up Audio..."
           pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
           pactl load-module module-null-sink sink_name=Sink1
+
+          echo "4. Disabling desktop notifications (dbus) ..."
+          # منع أي إشعارات سطح مكتب من الظهور
+          mkdir -p ~/.config
+          export $(dbus-launch) || true
+          # تعطيل خدمة الإشعارات إن وُجدت
+          systemctl --user mask org.freedesktop.Notifications.service 2>/dev/null || true
+          # منع notify-send من العمل (إن استُخدم)
+          sudo tee /usr/local/bin/notify-send > /dev/null <<'NS'
+          #!/bin/sh
+          exit 0
+          NS
+          sudo chmod +x /usr/local/bin/notify-send
 
       - name: Python Setup
         run: pip install -U urllib3 chardet requests selenium pyvirtualdisplay
@@ -47,10 +60,11 @@ jobs:
       - name: Create Python Script
         run: |
           cat << 'EOF' > main.py
-          import os, subprocess, time, requests, signal, urllib.parse
+          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.chrome.service import Service
 
           # رابط قاعدة بيانات فايربيس الخاصة بك
           FIREBASE_URL = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control.json"
@@ -130,6 +144,90 @@ jobs:
                           return False
               return True
 
+          def build_chrome_prefs_dir():
+              """
+              ينشئ مجلد prefs مؤقت يحتوي على Preferences تُعطّل الإشعارات نهائياً.
+              نستخدمه عبر --user-data-dir.
+              """
+              profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
+              default_dir = os.path.join(profile_dir, "Default")
+              os.makedirs(default_dir, exist_ok=True)
+
+              prefs = {
+                  # ===== تعطيل الإشعارات نهائياً =====
+                  "profile": {
+                      "default_content_setting_values": {
+                          "notifications": 2,          # 2 = Block
+                          "geolocation": 2,
+                          "media_stream": 1,           # 1 = Allow (نحتاج المايك/الكاميرا للعبة)
+                          "media_stream_mic": 1,
+                          "media_stream_camera": 1,
+                          "sound": 1,                  # السماح بالصوت
+                      },
+                      "default_content_settings": {
+                          "notifications": 2,
+                          "popups": 1,
+                          "geolocation": 2,
+                      },
+                      "block_popups": True,
+                      "exit_type": "Normal",
+                      "exited_cleanly": True,
+                  },
+                  # ===== تعطيل مترجم الصفحات والإشعارات الجانبية =====
+                  "translate": {
+                      "enabled": False,
+                  },
+                  "credentials_enable_service": False,
+                  "credentials_enable_autosignin": False,
+                  "profile.password_manager_enabled": False,
+                  "profile.password_manager_leak_detection": False,
+                  # ===== تعطيل إشعارات "حفظ كلمة المرور" =====
+                  "autofill": {
+                      "profile_enabled": False,
+                      "credit_card_enabled": False,
+                  },
+                  # ===== تعطيل إشعارات Chrome الداخلية =====
+                  "browser": {
+                      "has_seen_welcome_page": True,
+                      "check_default_browser": False,
+                  },
+                  "distribution": {
+                      "skip_first_run_ui": True,
+                      "suppress_first_run_bubble": True,
+                      "import_bookmarks": False,
+                      "import_history": False,
+                      "import_search_engine": False,
+                      "make_chrome_default": False,
+                      "make_chrome_default_for_user": False,
+                      "show_welcome_page": False,
+                      "skip_first_run_tasks": True,
+                  },
+              }
+
+              prefs_path = os.path.join(default_dir, "Preferences")
+              with open(prefs_path, "w", encoding="utf-8") as f:
+                  json.dump(prefs, f)
+
+              # ملف Local State لمنع "first run" bubble
+              local_state = {
+                  "browser": {
+                      "enabled_labs_experiments": [],
+                      "has_seen_welcome_page": True,
+                  },
+                  "distribution": {
+                      "skip_first_run_ui": True,
+                      "suppress_first_run_bubble": True,
+                      "make_chrome_default": False,
+                      "make_chrome_default_for_user": False,
+                      "show_welcome_page": False,
+                      "skip_first_run_tasks": True,
+                  },
+              }
+              with open(os.path.join(profile_dir, "Local State"), "w", encoding="utf-8") as f:
+                  json.dump(local_state, f)
+
+              return profile_dir
+
           def main():
               # تحديث حالة الجلسة في فايربيس لتصبح شغالة
               try:
@@ -139,6 +237,10 @@ jobs:
 
               sink_name = "Sink1"
               os.environ['PULSE_SINK'] = sink_name
+
+              # منع أي إشعارات سطح مكتب عبر DBus
+              os.environ['DBUS_SESSION_BUS_ADDRESS'] = '/dev/null'
+              os.environ['NOTIFY_SOCKET'] = '/dev/null'
               
               disp = Display(visible=0, size=(720, 1280), backend='xvfb')
               disp.start()
@@ -153,9 +255,79 @@ jobs:
               opts.add_argument('--autoplay-policy=no-user-gesture-required')
               opts.add_argument('--window-size=720,1280')
               opts.add_argument('--kiosk')
-              
+
+              # ===== تعطيل الإشعارات نهائياً =====
+              opts.add_argument('--disable-notifications')
+              opts.add_argument('--disable-push-api')
+              opts.add_argument('--disable-desktop-notifications')
+              opts.add_argument('--disable-features=TranslateUI,Translate,NotificationTriggers,NotificationIndicator,WebPush,BackgroundFetch,PeriodicBackgroundSync')
+              opts.add_argument('--disable-infobars')
+              opts.add_argument('--disable-session-crashed-bubble')
+              opts.add_argument('--disable-component-update')
+              opts.add_argument('--disable-background-networking')
+              opts.add_argument('--disable-default-apps')
+              opts.add_argument('--disable-sync')
+              opts.add_argument('--no-default-browser-check')
+              opts.add_argument('--no-first-run')
+              opts.add_argument('--disable-popup-blocking')
+              opts.add_argument('--disable-translate')
+              opts.add_argument('--disable-extensions')
+              opts.add_argument('--disable-breakpad')
+              opts.add_argument('--disable-hang-monitor')
+              opts.add_argument('--disable-client-side-phishing-detection')
+              opts.add_argument('--disable-crash-reporter')
+              opts.add_argument('--disable-logging')
+              opts.add_argument('--silent')
+              opts.add_argument('--metrics-recording-only')
+              opts.add_argument('--disable-domain-reliability')
+              opts.add_argument('--disable-background-timer-throttling')
+              opts.add_argument('--disable-renderer-backgrounding')
+              opts.add_argument('--disable-backgrounding-occluded-windows')
+              opts.add_argument('--disable-ipc-flooding-protection')
+              opts.add_argument('--password-store=basic')
+              opts.add_argument('--use-mock-keychain')
+              opts.add_argument('--deny-permission-prompts')
+              opts.add_argument('--disable-permissions-api')
+              opts.add_argument('--block-new-web-contents')
+              # ===== منع "حفظ كلمة المرور" =====
+              prefs = {
+                  "credentials_enable_service": False,
+                  "profile.password_manager_enabled": False,
+                  "profile.default_content_setting_values.notifications": 2,
+                  "profile.default_content_setting_values.geolocation": 2,
+              }
+              opts.add_experimental_option("prefs", prefs)
+              # ===== إخفاء "Chrome is being controlled by automated test software" =====
+              opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+              opts.add_experimental_option("useAutomationExtension", False)
+
+              # ===== إنشاء ملف تعريف مع إعدادات تُعطّل الإشعارات نهائياً =====
+              profile_dir = build_chrome_prefs_dir()
+              opts.add_argument(f"--user-data-dir={profile_dir}")
+
               driver = webdriver.Chrome(options=opts)
               driver.set_window_size(720, 1280)
+
+              # ===== منع الإشعارات عبر CDP (Chrome DevTools Protocol) =====
+              try:
+                  # حظر إذن الإشعارات لكل النطاقات
+                  driver.execute_cdp_cmd("Browser.setPermission", {
+                      "permission": {"name": "notifications"},
+                      "setting": "denied",
+                      "origin": "*"
+                  })
+                  # حظر النوافذ المنبثقة
+                  driver.execute_cdp_cmd("Browser.setPermission", {
+                      "permission": {"name": "geolocation"},
+                      "setting": "denied",
+                      "origin": "*"
+                  })
+                  # منع أي إشعارات عبر Page
+                  driver.execute_cdp_cmd("Page.enable", {})
+                  driver.execute_cdp_cmd("Page.setBypassCSP", {"enabled": True})
+              except Exception as e:
+                  print(f"⚠️ CDP permissions warning: {e}")
+
               GLOBAL_REFS["driver"] = driver
 
               ffmpeg_proc = None
