@@ -116,6 +116,25 @@ jobs:
                       script_url = data.get("script_url", "")
                       session_active = data.get("session_active", False)
                       start_time = data.get("start_time", 0)
+                      end_time = data.get("end_time", 0)  # ⏳ وقت الإنهاء العشوائي
+
+                      # ⏳ التحقق من انتهاء المدة العشوائية (1.5 - 2.3 ساعة) — إنهاء الجلسة
+                      if session_active and end_time and (time.time() * 1000) >= end_time:
+                          print("⏳ انتهت المدة العشوائية للجلسة — إيقاف البث وإنهاء الجلسة تلقائياً...")
+                          try:
+                              requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False})
+                          except Exception as e:
+                              print(f"⚠️ فشل إنهاء الجلسة في Firebase: {e}")
+                          # إنهاء العمليات والخروج
+                          if fan_process: fan_process.terminate()
+                          if ffmpeg_proc: ffmpeg_proc.kill()
+                          try:
+                              driver.quit()
+                          except:
+                              pass
+                          disp.stop()
+                          print("🛑 تم إنهاء الجلسة تلقائياً بسبب انتهاء المدة.")
+                          os._exit(0)
 
                       # ⏱️ البدء التلقائي للبث بعد 90 ثانية من start_time
                       # يعمل فقط إذا: الجلسة نشطة + لم يبدأ البث بعد + لم يُنفَّذ البدء التلقائي سابقاً
