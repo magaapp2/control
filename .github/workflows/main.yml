@@ -69,7 +69,6 @@ jobs:
 
           echo "3. Downloading packages to cache (excluding Chrome)..."
           cd ~/apt-cache
-          # نقوم بتحميل المكتبات الأساسية فقط، ونستثني المتصفح لكي لا يحدث خطأ
           sudo apt-get download xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11 || true
           
           echo "4. Installing system packages from local cache..."
@@ -77,7 +76,6 @@ jobs:
              sudo dpkg -i *.deb || true
           fi
           
-          # إصلاح أي اعتماديات ناقصة لمكتبات النظام
           sudo apt-get install -y -f --no-install-recommends || true
 
           echo "5. Installing Google Chrome directly (Faster & Safer)..."
@@ -267,6 +265,7 @@ jobs:
               profile_dir = build_chrome_prefs_dir()
               opts.add_argument(f"--user-data-dir={profile_dir}")
 
+              # 💡 الحل هنا: إزالة Service() لإجبار سيليينيوم على تحميل الإصدار المطابق تلقائياً
               driver = webdriver.Chrome(options=opts)
               driver.set_window_size(720, 1360)
 
@@ -332,7 +331,6 @@ jobs:
                               '-thread_queue_size', '1024',
                               '-f', 'pulse', '-i', f"{sink_name}.monitor",
                               '-map', '0:v', '-map', '1:a',
-                              # هنا نقص أول 120 بكسل من الأعلى (لإخفاء شريط المتصفح) ونترك 1240 بكسل للطول
                               '-vf', 'crop=720:1240:0:120,fps=60', 
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                               '-x264-params', 'threads=2:sliced-threads=1',
