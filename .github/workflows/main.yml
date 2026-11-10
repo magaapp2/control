@@ -35,24 +35,42 @@ jobs:
           retain_days: 0
           keep_minimum_runs: 1
 
-      # ⚡ السرعة الخارقة: فك ضغط الملفات الجاهزة
-      - name: Extract Pre-installed Dependencies
+      # ⚡ السرعة الخارقة: فك ضغط الملفات الجاهزة (لو موجودة) أو إنشائها (لو مش موجودة)
+      - name: Extract or Install Dependencies
         run: |
-          echo "1. Extracting dependencies from ZIP (Fast)..."
-          mkdir -p /tmp/deps
-          unzip -q deps.zip -d /tmp/deps
-          
-          echo "2. Copying files to system..."
-          sudo cp -r /tmp/deps/lib/* /usr/lib/x86_64-linux-gnu/ || true
-          sudo cp /tmp/deps/ffmpeg /usr/bin/ || true
-          sudo cp /tmp/deps/ffplay /usr/bin/ || true
-          sudo cp /tmp/deps/xvfb-run /usr/bin/ || true
-          sudo cp /tmp/deps/xdotool /usr/bin/ || true
-          sudo cp /tmp/deps/unclutter /usr/bin/ || true
-          sudo cp /tmp/deps/google-chrome-stable /usr/bin/ || true
-          sudo cp -r /tmp/deps/pulseaudio /usr/share/ || true
-          
-          sudo chmod +x /usr/bin/ffmpeg /usr/bin/xvfb-run /usr/bin/xdotool /usr/bin/unclutter /usr/bin/google-chrome-stable || true
+          echo "1. Checking for deps.zip..."
+          if [ -f "deps.zip" ]; then
+            echo "✅ Found deps.zip! Extracting (Fast)..."
+            mkdir -p /tmp/deps
+            unzip -q deps.zip -d /tmp/deps
+            
+            echo "2. Copying files to system..."
+            sudo cp -r /tmp/deps/lib/* /usr/lib/x86_64-linux-gnu/ || true
+            sudo cp /tmp/deps/ffmpeg /usr/bin/ || true
+            sudo cp /tmp/deps/ffplay /usr/bin/ || true
+            sudo cp /tmp/deps/xvfb-run /usr/bin/ || true
+            sudo cp /tmp/deps/xdotool /usr/bin/ || true
+            sudo cp /tmp/deps/unclutter /usr/bin/ || true
+            sudo cp /tmp/deps/google-chrome-stable /usr/bin/ || true
+            sudo cp -r /tmp/deps/pulseaudio /usr/share/ || true
+            sudo chmod +x /usr/bin/ffmpeg /usr/bin/xvfb-run /usr/bin/xdotool /usr/bin/unclutter /usr/bin/google-chrome-stable || true
+            
+            echo "✅ Extracted and installed in seconds!"
+          else
+            echo "⚠️ deps.zip not found. Installing from scratch (This will take a few minutes)..."
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11
+            wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -y -f || true
+            rm google-chrome-stable_current_amd64.deb
+            
+            echo "Zipping new dependencies for future runs..."
+            mkdir -p deps_to_zip
+            sudo cp /usr/bin/ffmpeg /usr/bin/ffplay /usr/bin/xvfb-run /usr/bin/xdotool /usr/bin/unclutter /usr/bin/google-chrome-stable deps_to_zip/ || true
+            sudo cp -r /usr/lib/x86_64-linux-gnu deps_to_zip/lib || true
+            sudo cp -r /usr/share/pulseaudio deps_to_zip/ || true
+            cd deps_to_zip && sudo zip -r ../deps.zip ./* && cd ..
+          fi
 
           echo "3. Setting up Audio..."
           pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
