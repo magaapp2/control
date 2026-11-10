@@ -89,13 +89,9 @@ jobs:
           from selenium.webdriver.chrome.options import Options
           from selenium.webdriver.chrome.service import Service
 
-          # رابط قاعدة البيانات الأساسي
           FIREBASE_BASE = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app"
-
-          # ⏱️ مدة الانتظار قبل بدء البث التلقائي
           AUTO_START_DELAY_SECONDS = 90
 
-          # متغير عالمي لحفظ اسم المستخدم النشط
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
               "fan_process": None,
@@ -113,18 +109,14 @@ jobs:
                   res = requests.get(user_url(username), timeout=5)
                   return res.json() or {}
               except Exception as e:
-                  print(f"Error fetching Firebase for {username}: {e}")
                   return {}
 
           def cleanup_processes():
-              fp = GLOBAL_REFS.get("fan_process")
-              if fp:
-                  try: fp.terminate()
-                  except: pass
-              ff = GLOBAL_REFS.get("ffmpeg_proc")
-              if ff:
-                  try: ff.kill()
-                  except: pass
+              for key in ["fan_process", "ffmpeg_proc"]:
+                  p = GLOBAL_REFS.get(key)
+                  if p:
+                      try: p.terminate()
+                      except: pass
               drv = GLOBAL_REFS.get("driver")
               if drv:
                   try: drv.quit()
@@ -135,14 +127,12 @@ jobs:
                   except: pass
 
           def kill_all(signum, frame):
-              print(f"⚠️ تم استلام إشارة ({signum}) — جاري التنظيف والخروج...")
               cleanup_processes()
               u = GLOBAL_REFS.get("username")
               if u:
                   try:
                       requests.patch(user_url(u), json={"session_active": False, "streaming": False}, timeout=2)
                   except: pass
-              print("🛑 خروج فوري.")
               os._exit(0)
 
           signal.signal(signal.SIGTERM, kill_all)
@@ -181,6 +171,8 @@ jobs:
                       "exit_type": "Normal",
                       "exited_cleanly": True,
                   },
+                  # إخفاء شريط المفضلة نهائياً
+                  "bookmark_bar": { "show_on_all_tabs": False },
                   "translate": { "enabled": False },
                   "credentials_enable_service": False,
                   "credentials_enable_autosignin": False,
@@ -200,28 +192,13 @@ jobs:
               prefs_path = os.path.join(default_dir, "Preferences")
               with open(prefs_path, "w", encoding="utf-8") as f: json.dump(prefs, f)
 
-              local_state = {
-                  "browser": { "enabled_labs_experiments": [], "has_seen_welcome_page": True },
-                  "distribution": {
-                      "skip_first_run_ui": True, "suppress_first_run_bubble": True,
-                      "make_chrome_default": False, "make_chrome_default_for_user": False,
-                      "show_welcome_page": False, "skip_first_run_tasks": True,
-                  },
-              }
-              with open(os.path.join(profile_dir, "Local State"), "w", encoding="utf-8") as f:
-                  json.dump(local_state, f)
-
               return profile_dir
 
           def main():
               username = os.environ.get("INPUT_USERNAME")
-              if not username:
-                  print("🛑 لم يتم إرسال username مع الـ Workflow. إنهاء الجلسة.")
-                  return
+              if not username: return
                   
               GLOBAL_REFS["username"] = username
-              print(f"👤 المستخدم النشط: {username}")
-
               try:
                   requests.patch(user_url(username), json={"session_active": True})
               except: pass
@@ -231,7 +208,8 @@ jobs:
               os.environ['DBUS_SESSION_BUS_ADDRESS'] = '/dev/null'
               os.environ['NOTIFY_SOCKET'] = '/dev/null'
               
-              disp = Display(visible=0, size=(720, 1280), backend='xvfb')
+              # تم تكبير الشاشة قليلاً لتعويض مساحة شريط المتصفح الذي سنقصه
+              disp = Display(visible=0, size=(720, 1360), backend='xvfb')
               disp.start()
               GLOBAL_REFS["disp"] = disp
               os.environ['DISPLAY'] = f":{disp.display}"
@@ -242,52 +220,26 @@ jobs:
               opts.add_argument('--no-sandbox')
               opts.add_argument('--disable-dev-shm-usage')
               opts.add_argument('--autoplay-policy=no-user-gesture-required')
+              opts.add_argument('--window-size=720,1360')
+              opts.add_argument('--start-maximized')
               
-              # 📱 إعدادات الشاشة وإخفاء الواجهة
-              opts.add_argument('--window-size=720,1280')
-              opts.add_argument('--start-maximized') # ملء الشاشة
-              opts.add_argument('--kiosk')           # وضع الكشك (إخفاء كل شيء)
-              
-              # 🔕 تعطيل كل الإشعارات ومنعها من الظهور
+              # إخفاء شريط المفضلة والواجهات
+              opts.add_argument('--disable-infobars')
               opts.add_argument('--disable-notifications')
               opts.add_argument('--disable-push-api')
               opts.add_argument('--disable-desktop-notifications')
               opts.add_argument('--disable-features=TranslateUI,Translate,NotificationTriggers,NotificationIndicator,WebPush,BackgroundFetch,PeriodicBackgroundSync')
-              
-              # إخفاء الأشرطة والواجهات
-              opts.add_argument('--disable-infobars')
-              opts.add_argument('--disable-session-crashed-bubble')
-              opts.add_argument('--disable-component-update')
-              opts.add_argument('--disable-background-networking')
-              opts.add_argument('--disable-default-apps')
-              opts.add_argument('--disable-sync')
               opts.add_argument('--no-default-browser-check')
               opts.add_argument('--no-first-run')
-              opts.add_argument('--disable-popup-blocking')
-              opts.add_argument('--disable-translate')
-              opts.add_argument('--disable-extensions')
-              opts.add_argument('--disable-breakpad')
-              opts.add_argument('--disable-hang-monitor')
-              opts.add_argument('--disable-client-side-phishing-detection')
-              opts.add_argument('--disable-crash-reporter')
-              opts.add_argument('--disable-logging')
-              opts.add_argument('--silent')
-              opts.add_argument('--metrics-recording-only')
-              opts.add_argument('--disable-domain-reliability')
-              opts.add_argument('--disable-background-timer-throttling')
-              opts.add_argument('--disable-renderer-backgrounding')
-              opts.add_argument('--disable-backgrounding-occluded-windows')
-              opts.add_argument('--disable-ipc-flooding-protection')
-              opts.add_argument('--password-store=basic')
-              opts.add_argument('--use-mock-keychain')
-              opts.add_argument('--deny-permission-prompts')
-              opts.add_argument('--disable-permissions-api')
-              
+              opts.add_argument('--disable-sync')
+              opts.add_argument('--hide-crash-restore-bubble')
+              opts.add_argument('--disable-session-crashed-bubble')
+
               prefs = {
                   "credentials_enable_service": False,
                   "profile.password_manager_enabled": False,
                   "profile.default_content_setting_values.notifications": 2,
-                  "profile.default_content_setting_values.geolocation": 2,
+                  "bookmark_bar": { "show_on_all_tabs": False }
               }
               opts.add_experimental_option("prefs", prefs)
               opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
@@ -297,16 +249,13 @@ jobs:
               opts.add_argument(f"--user-data-dir={profile_dir}")
 
               driver = webdriver.Chrome(options=opts)
-              driver.set_window_size(720, 1280)
+              driver.set_window_size(720, 1360)
 
-              # 🚫 حظر الإشعارات نهائياً من المتصفح نفسه
               try:
                   driver.execute_cdp_cmd("Browser.setPermission", { "permission": {"name": "notifications"}, "setting": "denied", "origin": "*" })
-                  driver.execute_cdp_cmd("Browser.setPermission", { "permission": {"name": "geolocation"}, "setting": "denied", "origin": "*" })
                   driver.execute_cdp_cmd("Page.enable", {})
-                  driver.execute_cdp_cmd("Page.setBypassCSP", {"enabled": True})
               except Exception as e:
-                  print(f"⚠️ CDP permissions warning: {e}")
+                  pass
 
               GLOBAL_REFS["driver"] = driver
 
@@ -315,15 +264,10 @@ jobs:
               last_url = ""
               auto_start_done = False
 
-              print("🟢 جيت هب بدأ الاستماع لأوامر لوحة التحكم لحظياً...")
-
               try:
                   while True:
                       data = get_firebase_data(username)
-                      
-                      if not data:
-                          print("🛑 لا توجد بيانات للمستخدم، ربما تم حذفه. خروج.")
-                          break
+                      if not data: break
 
                       streaming_active = data.get("streaming", False)
                       game_url = data.get("game_url", "")
@@ -332,88 +276,53 @@ jobs:
                       start_time = data.get("start_time", 0)
                       end_time = data.get("end_time", 0)
 
-                      if not session_active:
-                          print("🛑 تم إيقاف الجلسة من لوحة التحكم — خروج فوري...")
-                          break
+                      if not session_active: break
 
                       if session_active and end_time and (time.time() * 1000) >= end_time:
-                          print("⏳ انتهت المدة العشوائية للجلسة — إيقاف البث...")
-                          try:
-                              requests.patch(user_url(username), json={"session_active": False, "streaming": False})
-                          except Exception as e:
-                              print(f"⚠️ فشل إنهاء الجلسة في Firebase: {e}")
+                          try: requests.patch(user_url(username), json={"session_active": False, "streaming": False})
+                          except: pass
                           break
 
-                      if (session_active and not streaming_active and not auto_start_done 
-                              and start_time and stream_key):
+                      if (session_active and not streaming_active and not auto_start_done and start_time and stream_key):
                           elapsed = (time.time() * 1000) - start_time
                           if elapsed >= AUTO_START_DELAY_SECONDS * 1000:
-                              print(f"⏱️ مرت {int(elapsed/1000)} ثانية — تشغيل البث تلقائياً...")
                               try:
                                   requests.patch(user_url(username), json={"streaming": True})
                                   streaming_active = True
-                                  print("✅ تم كتابة streaming=True تلقائياً.")
-                              except Exception as e:
-                                  print(f"⚠️ فشل كتابة streaming: {e}")
+                              except: pass
                               auto_start_done = True
 
                       if game_url and game_url != last_url:
-                          print(f"🔄 جاري الانتقال لرابط اللعبة: {game_url}")
                           try:
                               driver.get(game_url)
                               last_url = game_url
-                              if not sleep_interruptible(5, username):
-                                  print("🛑 تم إيقاف الجلسة أثناء انتظار تحميل اللعبة.")
-                                  break
+                              if not sleep_interruptible(5, username): break
                               os.system("xdotool key Tab Tab Tab Return")
                           except Exception as e:
-                              print(f"Error loading game URL: {e}")
+                              pass
 
                       if streaming_active and not ffmpeg_proc and stream_key:
-                          print("🚀 بدء بث FFmpeg إلى يوتيوب...")
-                          
-                          fan_cmd = [
-                              'ffplay', '-f', 'lavfi', 
-                              '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', 
-                              '-nodisp', '-loop', '0', '-loglevel', 'quiet'
-                          ]
-                          fan_env = os.environ.copy()
-                          fan_env['PULSE_SINK'] = sink_name
-                          fan_process = subprocess.Popen(fan_cmd, env=fan_env)
+                          fan_cmd = ['ffplay', '-f', 'lavfi', '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', '-nodisp', '-loop', '0', '-loglevel', 'quiet']
+                          fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
                           GLOBAL_REFS["fan_process"] = fan_process
 
-                          # 🎥 تم إزالة فلتر drawbox لإلغاء القص (الـ 15%) وعرض الشاشة كاملة
+                          # 🎥 السر هنا: نستخدم فلتر crop لقص شريط المتصفح العلوي (80 بكسل)
                           ffmpeg_cmd = [
-                              'ffmpeg', '-y',
-                              '-nostats', '-loglevel', 'error',
+                              'ffmpeg', '-y', '-nostats', '-loglevel', 'error',
                               '-thread_queue_size', '1024',
-                              '-f', 'x11grab',
-                              '-draw_mouse', '0',
-                              '-framerate', '60',
-                              '-video_size', '720x1280',
-                              '-i', f":{disp.display}",
+                              '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60', '-video_size', '720x1360', '-i', f":{disp.display}",
                               '-thread_queue_size', '1024',
-                              '-f', 'pulse',
-                              '-i', f"{sink_name}.monitor",
-                              '-map', '0:v',
-                              '-map', '1:a',
-                              # هنا تم حذف القص، البث يعرض 720x1280 كاملة
-                              '-vf', 'fps=60', 
-                              '-c:v', 'libx264',
-                              '-preset', 'ultrafast',
-                              '-tune', 'zerolatency',
+                              '-f', 'pulse', '-i', f"{sink_name}.monitor",
+                              '-map', '0:v', '-map', '1:a',
+                              # هنا نقص أول 80 بكسل (شريط المتصفح) ونبقي على الباقي
+                              '-vf', 'crop=720:1280:0:80,fps=60', 
+                              '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                               '-x264-params', 'threads=2:sliced-threads=1',
                               '-max_muxing_queue_size', '1024',
-                              '-b:v', '3000k',
-                              '-maxrate', '3000k',
-                              '-bufsize', '6000k',
-                              '-r', '60',
-                              '-g', '120',
-                              '-keyint_min', '120',
-                              '-sc_threshold', '0',
+                              '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
+                              '-r', '60', '-g', '120', '-keyint_min', '120', '-sc_threshold', '0',
                               '-pix_fmt', 'yuv420p',
-                              '-c:a', 'aac',
-                              '-b:a', '128k',
+                              '-c:a', 'aac', '-b:a', '128k',
                               '-f', 'flv',
                               f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
                           ]
@@ -421,24 +330,18 @@ jobs:
                           GLOBAL_REFS["ffmpeg_proc"] = ffmpeg_proc
 
                       elif not streaming_active and ffmpeg_proc:
-                          print("⏹️ تم إيقاف البث من لوحة التحكم.")
                           if fan_process:
                               fan_process.terminate()
                               fan_process = None
-                              GLOBAL_REFS["fan_process"] = None
                           if ffmpeg_proc:
                               ffmpeg_proc.terminate()
                               ffmpeg_proc = None
-                              GLOBAL_REFS["ffmpeg_proc"] = None
 
-                      if not sleep_interruptible(3, username):
-                          print("🛑 تم إيقاف الجلسة أثناء الانتظار.")
-                          break
+                      if not sleep_interruptible(3, username): break
 
               except Exception as e:
-                  print(f"Error in main loop: {e}")
+                  pass
               finally:
-                  print("🧹 بدء التنظيف النهائي...")
                   if fan_process: 
                       try: fan_process.terminate()
                       except: pass
@@ -448,11 +351,8 @@ jobs:
                   try: driver.quit()
                   except: pass
                   disp.stop()
-                  
-                  try:
-                      requests.patch(user_url(username), json={"session_active": False, "streaming": False}, timeout=3)
+                  try: requests.patch(user_url(username), json={"session_active": False, "streaming": False}, timeout=3)
                   except: pass
-                  print("🛑 انتهت جلسة البث تماماً.")
 
           if __name__ == "__main__":
               main()
@@ -465,7 +365,6 @@ jobs:
           INPUT_USERNAME: ${{ github.event.inputs.username }}
         run: python main.py
 
-      # ✨ تحديث الفايربيز لو الجلسة اتلغت أو انتهت من جيت هب
       - name: Cleanup Firebase on Cancel/Timeout
         if: always()
         run: |
