@@ -58,6 +58,9 @@ jobs:
 
           mkdir -p ~/.config
           export $(dbus-launch) || true
+          
+          # تعطيل خدمة الإشعارات في النظام نهائياً
+          systemctl --user mask org.freedesktop.Notifications.service 2>/dev/null || true
           sudo tee /usr/local/bin/notify-send > /dev/null <<'NS'
           #!/bin/sh
           exit 0
@@ -193,6 +196,8 @@ jobs:
               opts.add_argument('--disable-notifications')
               opts.add_argument('--disable-push-api')
               opts.add_argument('--disable-desktop-notifications')
+              
+              # حظر شامل لكل ميزات الإشعارات والنوافذ العائمة
               opts.add_argument('--disable-features=TranslateUI,Translate,NotificationTriggers,NotificationIndicator,WebPush,BackgroundFetch,PeriodicBackgroundSync,GlobalMediaControls,MediaRouter')
               opts.add_argument('--no-default-browser-check')
               opts.add_argument('--no-first-run')
@@ -275,8 +280,8 @@ jobs:
                               '-thread_queue_size', '1024',
                               '-f', 'pulse', '-i', f"{sink_name}.monitor",
                               '-map', '0:v', '-map', '1:a',
-                              # القص ثم إعادة التحجيم لضمان جودة 720p
-                              '-vf', 'crop=720:1210:0:150,scale=720:1280,fps=60',
+                              # زيادة القص إلى 160 بكسل لإخفاء شريط المتصفح العلوي نهائياً
+                              '-vf', 'crop=720:1200:0:120,scale=720:1280,fps=60',
                               '-vsync', '1', 
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                               '-x264-params', 'threads=2:sliced-threads=1',
