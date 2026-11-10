@@ -1,4 +1,4 @@
-name: Perpetual Dual Stream
+name: Stream Session
 
 on:
   workflow_dispatch:
@@ -17,6 +17,8 @@ env:
 
 jobs:
   stream:
+    # ✨ هذا السطر يجعل اسم الـ Job يظهر باسم المستخدم في لوحة GitHub
+    name: "👤 ${{ github.event.inputs.username }}"
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     permissions:
