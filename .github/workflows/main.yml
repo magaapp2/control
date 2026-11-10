@@ -35,44 +35,44 @@ jobs:
           retain_days: 0
           keep_minimum_runs: 1
 
-      # 🚀 استخدام أداة كاش APT الناضجة (بدلاً من الكتابة اليدوية)
-      - name: Install & Cache System Dependencies
-        uses: gerlero/apt-install@v1
-        with:
-          packages: >
-            xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11
-          update: true
-
-      - name: Install Google Chrome Directly
+      # ⚡ السرعة الخارقة: فك ضغط الملفات الجاهزة
+      - name: Extract Pre-installed Dependencies
         run: |
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -y -f || true
-          rm google-chrome-stable_current_amd64.deb
+          echo "1. Extracting dependencies from ZIP (Fast)..."
+          mkdir -p /tmp/deps
+          unzip -q deps.zip -d /tmp/deps
+          
+          echo "2. Copying files to system..."
+          sudo cp -r /tmp/deps/lib/* /usr/lib/x86_64-linux-gnu/ || true
+          sudo cp /tmp/deps/ffmpeg /usr/bin/ || true
+          sudo cp /tmp/deps/ffplay /usr/bin/ || true
+          sudo cp /tmp/deps/xvfb-run /usr/bin/ || true
+          sudo cp /tmp/deps/xdotool /usr/bin/ || true
+          sudo cp /tmp/deps/unclutter /usr/bin/ || true
+          sudo cp /tmp/deps/google-chrome-stable /usr/bin/ || true
+          sudo cp -r /tmp/deps/pulseaudio /usr/share/ || true
+          
+          sudo chmod +x /usr/bin/ffmpeg /usr/bin/xvfb-run /usr/bin/xdotool /usr/bin/unclutter /usr/bin/google-chrome-stable || true
 
-      - name: Cache Python Dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('.github/workflows/main.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Python Setup
-        run: pip install -U urllib3 chardet requests selenium pyvirtualdisplay
-
-      - name: Setup Audio & Notifications
-        run: |
+          echo "3. Setting up Audio..."
           pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
           pactl load-module module-null-sink sink_name=Sink1
-          
+
+          echo "4. Disabling notifications..."
           mkdir -p ~/.config
           export $(dbus-launch) || true
-          systemctl --user mask org.freedesktop.Notifications.service 2>/dev/null || true
           sudo tee /usr/local/bin/notify-send > /dev/null <<'NS'
           #!/bin/sh
           exit 0
           NS
           sudo chmod +x /usr/local/bin/notify-send
+
+      # 🚨 حل مشكلة التعارض: حذف الكروم درايفر القديم من مسار جيت هب
+      - name: Remove old Chromedriver & Python Setup
+        run: |
+          sudo rm -f /usr/bin/chromedriver
+          sudo rm -f /usr/local/bin/chromedriver
+          pip install -U urllib3 chardet requests selenium pyvirtualdisplay
 
       - name: Create Python Script
         run: |
@@ -83,7 +83,9 @@ jobs:
           from selenium.webdriver.chrome.options import Options
 
           FIREBASE_BASE = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app"
-          AUTO_START_DELAY_SECONDS = 90
+          
+          # ⏱️ تم تعديلها لتبدأ بعد 5 ثوانٍ فقط
+          AUTO_START_DELAY_SECONDS = 5 
 
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
@@ -250,6 +252,7 @@ jobs:
 
                       if (session_active and not streaming_active and not auto_start_done and start_time and stream_key):
                           elapsed = (time.time() * 1000) - start_time
+                          # ⏱️ ستتحقق الآن بعد 5 ثوانٍ فقط
                           if elapsed >= AUTO_START_DELAY_SECONDS * 1000:
                               try:
                                   requests.patch(user_url(username), json={"streaming": True})
@@ -261,7 +264,8 @@ jobs:
                           try:
                               driver.get(game_url)
                               last_url = game_url
-                              if not sleep_interruptible(5, username): break
+                              # نقوم بعمل Sleep قصير لتجنب الضغط على الأزرار أثناء التحميل
+                              if not sleep_interruptible(2, username): break
                               os.system("xdotool key Tab Tab Tab Return")
                           except Exception:
                               pass
@@ -271,17 +275,17 @@ jobs:
                           fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
                           GLOBAL_REFS["fan_process"] = fan_process
 
-                          # 🔥 مفتاح الحل: -itsoffset لتأخير الصوت قليلاً لمزامنة الصورة
-                          # نستخدم 0.2 ثانية كقيمة افتراضية، يمكنك تعديلها إذا كان التأخر مستمراً
                           ffmpeg_cmd = [
                               'ffmpeg', '-y', '-nostats', '-loglevel', 'error',
                               '-thread_queue_size', '1024',
                               '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60', '-video_size', '720x1360', '-i', f":{disp.display}",
-                              '-itsoffset', '0.2',  # 👈 تأخير الصوت 0.2 ثانية (جرب 0.3 أو 0.4 إذا لزم)
+                              '-itsoffset', '0.2', 
                               '-thread_queue_size', '1024',
                               '-f', 'pulse', '-i', f"{sink_name}.monitor",
                               '-map', '0:v', '-map', '1:a',
+                              # الحفاظ على جودة 720 عرض وتثبيت 60 فريم
                               '-vf', 'crop=720:1210:0:150,fps=60',
+                              '-vsync', '1', 
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                               '-x264-params', 'threads=2:sliced-threads=1',
                               '-max_muxing_queue_size', '1024',
