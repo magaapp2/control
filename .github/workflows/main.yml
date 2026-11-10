@@ -2,9 +2,14 @@ name: Perpetual Dual Stream
 
 on:
   workflow_dispatch:
+    inputs:
+      username:
+        description: 'اسم المستخدم صاحب الجلسة'
+        required: true
+        type: string
 
 concurrency:
-  group: streaming-group
+  group: streaming-group-${{ github.event.inputs.username }}
   cancel-in-progress: true
 
 env:
@@ -63,9 +68,8 @@ jobs:
           from selenium.webdriver.chrome.options import Options
           from selenium.webdriver.chrome.service import Service
 
-          # رابط قاعدة البيانات الأساسي (بدون control.json)
+          # رابط قاعدة البيانات الأساسي
           FIREBASE_BASE = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app"
-          ACTIVE_USER_URL = FIREBASE_BASE + "/control/active_user.json"
 
           # ⏱️ مدة الانتظار قبل بدء البث التلقائي
           AUTO_START_DELAY_SECONDS = 90
@@ -78,14 +82,6 @@ jobs:
               "disp": None,
               "username": None
           }
-
-          def get_active_user():
-              try:
-                  res = requests.get(ACTIVE_USER_URL, timeout=5)
-                  return res.json()
-              except Exception as e:
-                  print(f"Error fetching active user: {e}")
-                  return None
 
           def user_url(username):
               return FIREBASE_BASE + "/control/users/" + username + ".json"
@@ -196,10 +192,10 @@ jobs:
               return profile_dir
 
           def main():
-              # 1. جلب اسم المستخدم النشط
-              username = get_active_user()
+              # 1. جلب اسم المستخدم من الـ Workflow input
+              username = os.environ.get("INPUT_USERNAME")
               if not username:
-                  print("🛑 لا يوجد مستخدم نشط في active_user. إنهاء الجلسة.")
+                  print("🛑 لم يتم إرسال username مع الـ Workflow. إنهاء الجلسة.")
                   return
                   
               GLOBAL_REFS["username"] = username
@@ -440,4 +436,5 @@ jobs:
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           ENABLE_STREAM: ${{ env.ENABLE_STREAM }}
+          INPUT_USERNAME: ${{ github.event.inputs.username }}
         run: python main.py
