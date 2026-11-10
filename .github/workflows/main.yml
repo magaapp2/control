@@ -42,12 +42,9 @@ jobs:
           pactl load-module module-null-sink sink_name=Sink1
 
           echo "4. Disabling desktop notifications (dbus) ..."
-          # منع أي إشعارات سطح مكتب من الظهور
           mkdir -p ~/.config
           export $(dbus-launch) || true
-          # تعطيل خدمة الإشعارات إن وُجدت
           systemctl --user mask org.freedesktop.Notifications.service 2>/dev/null || true
-          # منع notify-send من العمل (إن استُخدم)
           sudo tee /usr/local/bin/notify-send > /dev/null <<'NS'
           #!/bin/sh
           exit 0
@@ -66,103 +63,96 @@ jobs:
           from selenium.webdriver.chrome.options import Options
           from selenium.webdriver.chrome.service import Service
 
-          # رابط قاعدة بيانات فايربيس الخاصة بك
-          FIREBASE_URL = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control.json"
+          # رابط قاعدة البيانات الأساسي (بدون control.json)
+          FIREBASE_BASE = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app"
+          ACTIVE_USER_URL = FIREBASE_BASE + "/control/active_user.json"
 
-          # ⏱️ مدة الانتظار قبل بدء البث التلقائي (بالثواني)
+          # ⏱️ مدة الانتظار قبل بدء البث التلقائي
           AUTO_START_DELAY_SECONDS = 90
 
-          # مراجع عالمية للعمليات حتى يستطيع kill_all إنهاءها فوراً
+          # متغير عالمي لحفظ اسم المستخدم النشط
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
               "fan_process": None,
               "driver": None,
               "disp": None,
+              "username": None
           }
 
-          def get_firebase_data():
+          def get_active_user():
               try:
-                  res = requests.get(FIREBASE_URL, timeout=5)
+                  res = requests.get(ACTIVE_USER_URL, timeout=5)
+                  return res.json()
+              except Exception as e:
+                  print(f"Error fetching active user: {e}")
+                  return None
+
+          def user_url(username):
+              return FIREBASE_BASE + "/control/users/" + username + ".json"
+
+          def get_firebase_data(username):
+              if not username: return {}
+              try:
+                  res = requests.get(user_url(username), timeout=5)
                   return res.json() or {}
               except Exception as e:
-                  print(f"Error fetching Firebase: {e}")
+                  print(f"Error fetching Firebase for {username}: {e}")
                   return {}
 
           def cleanup_processes():
-              """إنهاء FFmpeg و fan_process و driver و display بأمان."""
               fp = GLOBAL_REFS.get("fan_process")
               if fp:
-                  try:
-                      fp.terminate()
-                  except:
-                      pass
+                  try: fp.terminate()
+                  except: pass
               ff = GLOBAL_REFS.get("ffmpeg_proc")
               if ff:
-                  try:
-                      ff.kill()
-                  except:
-                      pass
+                  try: ff.kill()
+                  except: pass
               drv = GLOBAL_REFS.get("driver")
               if drv:
-                  try:
-                      drv.quit()
-                  except:
-                      pass
+                  try: drv.quit()
+                  except: pass
               dsp = GLOBAL_REFS.get("disp")
               if dsp:
-                  try:
-                      dsp.stop()
-                  except:
-                      pass
+                  try: dsp.stop()
+                  except: pass
 
           def kill_all(signum, frame):
-              """يُستدعى عند SIGTERM/SIGINT — تنظيف سريع ثم خروج فوري."""
               print(f"⚠️ تم استلام إشارة ({signum}) — جاري التنظيف والخروج...")
               cleanup_processes()
-              # محاولة إبلاغ Firebase بأن الجلسة توقفت (بمهلة قصيرة جداً)
-              try:
-                  requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False}, timeout=2)
-              except:
-                  pass
+              u = GLOBAL_REFS.get("username")
+              if u:
+                  try:
+                      requests.patch(user_url(u), json={"session_active": False, "streaming": False}, timeout=2)
+                  except: pass
               print("🛑 خروج فوري.")
               os._exit(0)
 
           signal.signal(signal.SIGTERM, kill_all)
           signal.signal(signal.SIGINT, kill_all)
 
-          def sleep_interruptible(seconds, data_check=True):
-              """
-              نوم قابل للمقاطعة: يفحص session_active كل ثانية.
-              إذا أصبحت false → يخرج من النوم فوراً ويعيد False.
-              يعيد True إذا اكتمل النوم بشكل طبيعي.
-              """
+          def sleep_interruptible(seconds, username):
               for _ in range(int(seconds)):
                   time.sleep(1)
-                  if data_check:
-                      d = get_firebase_data()
-                      if not d.get("session_active", False):
-                          return False
+                  d = get_firebase_data(username)
+                  if not d.get("session_active", False):
+                      return False
               return True
 
           def build_chrome_prefs_dir():
-              """
-              ينشئ مجلد prefs مؤقت يحتوي على Preferences تُعطّل الإشعارات نهائياً.
-              نستخدمه عبر --user-data-dir.
-              """
               profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
               default_dir = os.path.join(profile_dir, "Default")
               os.makedirs(default_dir, exist_ok=True)
 
               prefs = {
-                  # ===== تعطيل الإشعارات نهائياً =====
                   "profile": {
                       "default_content_setting_values": {
-                          "notifications": 2,          # 2 = Block
+                          "notifications": 2,
                           "geolocation": 2,
-                          "media_stream": 1,           # 1 = Allow (نحتاج المايك/الكاميرا للعبة)
+                          "media_stream": 1,
                           "media_stream_mic": 1,
                           "media_stream_camera": 1,
-                          "sound": 1,                  # السماح بالصوت
+                          "sound": 1,
                       },
                       "default_content_settings": {
                           "notifications": 2,
@@ -173,54 +163,31 @@ jobs:
                       "exit_type": "Normal",
                       "exited_cleanly": True,
                   },
-                  # ===== تعطيل مترجم الصفحات والإشعارات الجانبية =====
-                  "translate": {
-                      "enabled": False,
-                  },
+                  "translate": { "enabled": False },
                   "credentials_enable_service": False,
                   "credentials_enable_autosignin": False,
                   "profile.password_manager_enabled": False,
                   "profile.password_manager_leak_detection": False,
-                  # ===== تعطيل إشعارات "حفظ كلمة المرور" =====
-                  "autofill": {
-                      "profile_enabled": False,
-                      "credit_card_enabled": False,
-                  },
-                  # ===== تعطيل إشعارات Chrome الداخلية =====
-                  "browser": {
-                      "has_seen_welcome_page": True,
-                      "check_default_browser": False,
-                  },
+                  "autofill": { "profile_enabled": False, "credit_card_enabled": False },
+                  "browser": { "has_seen_welcome_page": True, "check_default_browser": False },
                   "distribution": {
-                      "skip_first_run_ui": True,
-                      "suppress_first_run_bubble": True,
-                      "import_bookmarks": False,
-                      "import_history": False,
-                      "import_search_engine": False,
-                      "make_chrome_default": False,
-                      "make_chrome_default_for_user": False,
-                      "show_welcome_page": False,
+                      "skip_first_run_ui": True, "suppress_first_run_bubble": True,
+                      "import_bookmarks": False, "import_history": False,
+                      "import_search_engine": False, "make_chrome_default": False,
+                      "make_chrome_default_for_user": False, "show_welcome_page": False,
                       "skip_first_run_tasks": True,
                   },
               }
 
               prefs_path = os.path.join(default_dir, "Preferences")
-              with open(prefs_path, "w", encoding="utf-8") as f:
-                  json.dump(prefs, f)
+              with open(prefs_path, "w", encoding="utf-8") as f: json.dump(prefs, f)
 
-              # ملف Local State لمنع "first run" bubble
               local_state = {
-                  "browser": {
-                      "enabled_labs_experiments": [],
-                      "has_seen_welcome_page": True,
-                  },
+                  "browser": { "enabled_labs_experiments": [], "has_seen_welcome_page": True },
                   "distribution": {
-                      "skip_first_run_ui": True,
-                      "suppress_first_run_bubble": True,
-                      "make_chrome_default": False,
-                      "make_chrome_default_for_user": False,
-                      "show_welcome_page": False,
-                      "skip_first_run_tasks": True,
+                      "skip_first_run_ui": True, "suppress_first_run_bubble": True,
+                      "make_chrome_default": False, "make_chrome_default_for_user": False,
+                      "show_welcome_page": False, "skip_first_run_tasks": True,
                   },
               }
               with open(os.path.join(profile_dir, "Local State"), "w", encoding="utf-8") as f:
@@ -229,16 +196,22 @@ jobs:
               return profile_dir
 
           def main():
-              # تحديث حالة الجلسة في فايربيس لتصبح شغالة
+              # 1. جلب اسم المستخدم النشط
+              username = get_active_user()
+              if not username:
+                  print("🛑 لا يوجد مستخدم نشط في active_user. إنهاء الجلسة.")
+                  return
+                  
+              GLOBAL_REFS["username"] = username
+              print(f"👤 المستخدم النشط: {username}")
+
+              # 2. تحديث حالة الجلسة لهذا المستخدم
               try:
-                  requests.patch(FIREBASE_URL, json={"session_active": True})
-              except:
-                  pass
+                  requests.patch(user_url(username), json={"session_active": True})
+              except: pass
 
               sink_name = "Sink1"
               os.environ['PULSE_SINK'] = sink_name
-
-              # منع أي إشعارات سطح مكتب عبر DBus
               os.environ['DBUS_SESSION_BUS_ADDRESS'] = '/dev/null'
               os.environ['NOTIFY_SOCKET'] = '/dev/null'
               
@@ -255,8 +228,6 @@ jobs:
               opts.add_argument('--autoplay-policy=no-user-gesture-required')
               opts.add_argument('--window-size=720,1280')
               opts.add_argument('--kiosk')
-
-              # ===== تعطيل الإشعارات نهائياً =====
               opts.add_argument('--disable-notifications')
               opts.add_argument('--disable-push-api')
               opts.add_argument('--disable-desktop-notifications')
@@ -289,7 +260,7 @@ jobs:
               opts.add_argument('--deny-permission-prompts')
               opts.add_argument('--disable-permissions-api')
               opts.add_argument('--block-new-web-contents')
-              # ===== منع "حفظ كلمة المرور" =====
+              
               prefs = {
                   "credentials_enable_service": False,
                   "profile.password_manager_enabled": False,
@@ -297,32 +268,18 @@ jobs:
                   "profile.default_content_setting_values.geolocation": 2,
               }
               opts.add_experimental_option("prefs", prefs)
-              # ===== إخفاء "Chrome is being controlled by automated test software" =====
               opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
               opts.add_experimental_option("useAutomationExtension", False)
 
-              # ===== إنشاء ملف تعريف مع إعدادات تُعطّل الإشعارات نهائياً =====
               profile_dir = build_chrome_prefs_dir()
               opts.add_argument(f"--user-data-dir={profile_dir}")
 
               driver = webdriver.Chrome(options=opts)
               driver.set_window_size(720, 1280)
 
-              # ===== منع الإشعارات عبر CDP (Chrome DevTools Protocol) =====
               try:
-                  # حظر إذن الإشعارات لكل النطاقات
-                  driver.execute_cdp_cmd("Browser.setPermission", {
-                      "permission": {"name": "notifications"},
-                      "setting": "denied",
-                      "origin": "*"
-                  })
-                  # حظر النوافذ المنبثقة
-                  driver.execute_cdp_cmd("Browser.setPermission", {
-                      "permission": {"name": "geolocation"},
-                      "setting": "denied",
-                      "origin": "*"
-                  })
-                  # منع أي إشعارات عبر Page
+                  driver.execute_cdp_cmd("Browser.setPermission", { "permission": {"name": "notifications"}, "setting": "denied", "origin": "*" })
+                  driver.execute_cdp_cmd("Browser.setPermission", { "permission": {"name": "geolocation"}, "setting": "denied", "origin": "*" })
                   driver.execute_cdp_cmd("Page.enable", {})
                   driver.execute_cdp_cmd("Page.setBypassCSP", {"enabled": True})
               except Exception as e:
@@ -334,77 +291,67 @@ jobs:
               fan_process = None
               last_url = ""
               script_triggered = False
-              auto_start_done = False  # ⏱️ هل تم تنفيذ البدء التلقائي؟
+              auto_start_done = False
 
               print("🟢 جيت هب بدأ الاستماع لأوامر لوحة التحكم لحظياً...")
 
               try:
                   while True:
-                      # جلب البيانات من فايربيس
-                      data = get_firebase_data()
+                      # جلب البيانات الخاصة بالمستخدم فقط
+                      data = get_firebase_data(username)
+                      
+                      # إذا تم مسح بيانات المستخدم أو تغييره
+                      if not data:
+                          print("🛑 لا توجد بيانات للمستخدم، ربما تم حذفه. خروج.")
+                          break
+
                       streaming_active = data.get("streaming", False)
                       game_url = data.get("game_url", "")
                       stream_key = data.get("stream_key", "")
-                      script_url = data.get("script_url", "")
                       session_active = data.get("session_active", False)
                       start_time = data.get("start_time", 0)
-                      end_time = data.get("end_time", 0)  # ⏳ وقت الإنهاء العشوائي
+                      end_time = data.get("end_time", 0)
 
-                      # 🛑 إنهاء الجلسة إذا طلب المستخدم (session_active = false)
-                      # هذا الفحص يضمن الاستجابة السريعة حتى لو لم يصل SIGTERM بعد
                       if not session_active:
                           print("🛑 تم إيقاف الجلسة من لوحة التحكم — خروج فوري...")
                           break
 
-                      # ⏳ التحقق من انتهاء المدة العشوائية (1.5 - 2.3 ساعة) — إنهاء الجلسة
                       if session_active and end_time and (time.time() * 1000) >= end_time:
-                          print("⏳ انتهت المدة العشوائية للجلسة — إيقاف البث وإنهاء الجلسة تلقائياً...")
+                          print("⏳ انتهت المدة العشوائية للجلسة — إيقاف البث...")
                           try:
-                              requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False})
+                              requests.patch(user_url(username), json={"session_active": False, "streaming": False})
                           except Exception as e:
                               print(f"⚠️ فشل إنهاء الجلسة في Firebase: {e}")
                           break
 
-                      # ⏱️ البدء التلقائي للبث بعد 90 ثانية من start_time
-                      # يعمل فقط إذا: الجلسة نشطة + لم يبدأ البث بعد + لم يُنفَّذ البدء التلقائي سابقاً
                       if (session_active and not streaming_active and not auto_start_done 
                               and start_time and stream_key):
                           elapsed = (time.time() * 1000) - start_time
                           if elapsed >= AUTO_START_DELAY_SECONDS * 1000:
-                              print(f"⏱️ مرت {int(elapsed/1000)} ثانية منذ بدء الجلسة — تشغيل البث تلقائياً...")
+                              print(f"⏱️ مرت {int(elapsed/1000)} ثانية — تشغيل البث تلقائياً...")
                               try:
-                                  requests.patch(FIREBASE_URL, json={"streaming": True})
+                                  requests.patch(user_url(username), json={"streaming": True})
                                   streaming_active = True
-                                  print("✅ تم كتابة streaming=True في Firebase تلقائياً.")
+                                  print("✅ تم كتابة streaming=True تلقائياً.")
                               except Exception as e:
-                                  print(f"⚠️ فشل كتابة streaming في Firebase: {e}")
+                                  print(f"⚠️ فشل كتابة streaming: {e}")
                               auto_start_done = True
 
-                      # 1. رابط النشر (Google Apps Script) — يُستدعى من HTML فقط
-                      # لا نستدعيه من هنا لتجنب إنشاء بث مزدوج وحذف البث الأصلي
-                      if script_url and not script_triggered:
-                          print("ℹ️ تم تخطي استدعاء Apps Script (يُستدعى من HTML فقط).")
-                          script_triggered = True  # نعتبره مُنفَّذاً حتى لا تتكرر المحاولة
-
-                      # 2. تحديث رابط اللعبة لحظياً إذا غيره المستخدم في الصفحة
-                      if game_url and game_url != last_url and script_triggered:
-                          print(f"🔄 جاري الانتقال لرابط اللعبة الجديد: {game_url}")
+                      if game_url and game_url != last_url:
+                          print(f"🔄 جاري الانتقال لرابط اللعبة: {game_url}")
                           try:
                               driver.get(game_url)
                               last_url = game_url
-                              # نوم قابل للمقاطعة بدل time.sleep(5)
-                              if not sleep_interruptible(5):
+                              if not sleep_interruptible(5, username):
                                   print("🛑 تم إيقاف الجلسة أثناء انتظار تحميل اللعبة.")
                                   break
                               os.system("xdotool key Tab Tab Tab Return")
                           except Exception as e:
                               print(f"Error loading game URL: {e}")
 
-                      # 3. تشغيل أو إيقاف بث FFmpeg بناءً على زر لوحة التحكم وشفرة البث
                       if streaming_active and not ffmpeg_proc and stream_key:
-                          print("🚀 بدء بث FFmpeg إلى يوتيوب مع إعدادات السلاسة وإخفاء الجزء العلوي...")
+                          print("🚀 بدء بث FFmpeg إلى يوتيوب...")
                           
-                          # صوت خلفية خفيف لمنع صمت البث
                           fan_cmd = [
                               'ffplay', '-f', 'lavfi', 
                               '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', 
@@ -415,7 +362,6 @@ jobs:
                           fan_process = subprocess.Popen(fan_cmd, env=fan_env)
                           GLOBAL_REFS["fan_process"] = fan_process
 
-                          # أمر البث المحسن مع الـ Buffer وإخفاء 10% من أعلى الشاشة (يساوي 128 بكسل) لتغطيتها بأسود أو اقتصاصها
                           ffmpeg_cmd = [
                               'ffmpeg', '-y',
                               '-nostats', '-loglevel', 'error',
@@ -430,10 +376,7 @@ jobs:
                               '-i', f"{sink_name}.monitor",
                               '-map', '0:v',
                               '-map', '1:a',
-                              
-                              # فلتر السلاسة وتغطية أول 10% من أعلى الشاشة (128 بكسل) بلون أسود لمنع ظهور أي شريط غير مرغوب فيه
                               '-vf', 'fps=60,drawbox=x=0:y=0:w=720:h=192:color=black:t=fill',
-                              
                               '-c:v', 'libx264',
                               '-preset', 'ultrafast',
                               '-tune', 'zerolatency',
@@ -466,9 +409,7 @@ jobs:
                               ffmpeg_proc = None
                               GLOBAL_REFS["ffmpeg_proc"] = None
 
-                      # الانتظار 3 ثوانٍ قبل فحص الأوامر الجديدة من فايربيس
-                      # نستخدم نوم قابل للمقاطعة بدل time.sleep(3)
-                      if not sleep_interruptible(3):
+                      if not sleep_interruptible(3, username):
                           print("🛑 تم إيقاف الجلسة أثناء الانتظار.")
                           break
 
@@ -482,17 +423,13 @@ jobs:
                   if ffmpeg_proc: 
                       try: ffmpeg_proc.kill()
                       except: pass
-                  try:
-                      driver.quit()
-                  except:
-                      pass
+                  try: driver.quit()
+                  except: pass
                   disp.stop()
                   
-                  # تحديث الحالة في فايربيس بأن الجلسة توقفت
                   try:
-                      requests.patch(FIREBASE_URL, json={"session_active": False, "streaming": False}, timeout=3)
-                  except:
-                      pass
+                      requests.patch(user_url(username), json={"session_active": False, "streaming": False}, timeout=3)
+                  except: pass
                   print("🛑 انتهت جلسة البث تماماً.")
 
           if __name__ == "__main__":
