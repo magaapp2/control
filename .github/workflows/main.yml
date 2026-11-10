@@ -71,7 +71,7 @@ jobs:
         run: |
           sudo rm -f /usr/bin/chromedriver
           sudo rm -f /usr/local/bin/chromedriver
-          pip install -U urllib3 chardet requests selenium pyvirtualdisplay
+          pip install -U urllib3 chardet requests selenium pyvirtualdisplay google-auth
 
       - name: Create Python Script
         run: |
@@ -80,6 +80,8 @@ jobs:
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
+          import google.auth.transport.requests
+          from google.oauth2 import service_account
 
           FIREBASE_BASE = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app"
           AUTO_START_DELAY_SECONDS = 5 
@@ -89,8 +91,29 @@ jobs:
               "fan_process": None,
               "driver": None,
               "disp": None,
-              "username": None
+              "username": None,
+              "access_token": None
           }
+
+          # دالة للحصول على التوكن الخاص بحساب الخدمة
+          def get_access_token():
+              if GLOBAL_REFS.get("access_token"):
+                  return GLOBAL_REFS["access_token"]
+              try:
+                  sa_info = json.loads(os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON', '{}'))
+                  if not sa_info:
+                      return None
+                  credentials = service_account.Credentials.from_service_account_info(
+                      sa_info,
+                      scopes=['https://www.googleapis.com/auth/firebase.database',
+                              'https://www.googleapis.com/auth/userinfo.email']
+                  )
+                  credentials.refresh(google.auth.transport.requests.Request())
+                  GLOBAL_REFS["access_token"] = credentials.token
+                  return credentials.token
+              except Exception as e:
+                  print(f"Error getting access token: {e}")
+                  return None
 
           def user_url(username):
               return FIREBASE_BASE + "/control/users/" + username + ".json"
@@ -98,10 +121,21 @@ jobs:
           def get_firebase_data(username):
               if not username: return {}
               try:
-                  res = requests.get(user_url(username), timeout=5)
+                  token = get_access_token()
+                  headers = {'Authorization': f'Bearer {token}'} if token else {}
+                  res = requests.get(user_url(username), headers=headers, timeout=5)
                   return res.json() or {}
               except Exception:
                   return {}
+
+          def patch_firebase(username, payload):
+              try:
+                  token = get_access_token()
+                  headers = {'Authorization': f'Bearer {token}'} if token else {}
+                  headers['Content-Type'] = 'application/json'
+                  requests.patch(user_url(username), json=payload, headers=headers, timeout=5)
+              except Exception:
+                  pass
 
           def cleanup_processes():
               for key in ["fan_process", "ffmpeg_proc"]:
@@ -122,9 +156,7 @@ jobs:
               cleanup_processes()
               u = GLOBAL_REFS.get("username")
               if u:
-                  try:
-                      requests.patch(user_url(u), json={"session_active": False, "streaming": False}, timeout=2)
-                  except: pass
+                  patch_firebase(u, {"session_active": False, "streaming": False})
               os._exit(0)
 
           signal.signal(signal.SIGTERM, kill_all)
@@ -170,9 +202,9 @@ jobs:
               username = os.environ.get("INPUT_USERNAME")
               if not username: return
               GLOBAL_REFS["username"] = username
-              try:
-                  requests.patch(user_url(username), json={"session_active": True})
-              except: pass
+              
+              # استخدام الدالة الجديدة للتحديث
+              patch_firebase(username, {"session_active": True})
 
               sink_name = "Sink1"
               os.environ['PULSE_SINK'] = sink_name
@@ -245,17 +277,14 @@ jobs:
                       if not session_active: break
 
                       if session_active and end_time and (time.time() * 1000) >= end_time:
-                          try: requests.patch(user_url(username), json={"session_active": False, "streaming": False})
-                          except: pass
+                          patch_firebase(username, {"session_active": False, "streaming": False})
                           break
 
                       if (session_active and not streaming_active and not auto_start_done and start_time and stream_key):
                           elapsed = (time.time() * 1000) - start_time
                           if elapsed >= AUTO_START_DELAY_SECONDS * 1000:
-                              try:
-                                  requests.patch(user_url(username), json={"streaming": True})
-                                  streaming_active = True
-                              except: pass
+                              patch_firebase(username, {"streaming": True})
+                              streaming_active = True
                               auto_start_done = True
 
                       if game_url and game_url != last_url:
@@ -318,8 +347,7 @@ jobs:
                   try: driver.quit()
                   except: pass
                   disp.stop()
-                  try: requests.patch(user_url(username), json={"session_active": False, "streaming": False}, timeout=3)
-                  except: pass
+                  patch_firebase(username, {"session_active": False, "streaming": False})
 
           if __name__ == "__main__":
               main()
@@ -330,12 +358,23 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           ENABLE_STREAM: ${{ env.ENABLE_STREAM }}
           INPUT_USERNAME: ${{ github.event.inputs.username }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: python main.py
 
       - name: Cleanup Firebase on Cancel/Timeout
         if: always()
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
-          curl -X PATCH \
-          -H "Content-Type: application/json" \
-          -d '{"session_active": false, "streaming": false}' \
-          "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/${{ github.event.inputs.username }}.json"
+          python -c "
+          import os, json, requests, google.auth.transport.requests
+          from google.oauth2 import service_account
+          try:
+              sa_info = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT_JSON'])
+              creds = service_account.Credentials.from_service_account_info(sa_info, scopes=['https://www.googleapis.com/auth/firebase.database'])
+              creds.refresh(google.auth.transport.requests.Request())
+              headers = {'Authorization': f'Bearer {creds.token}', 'Content-Type': 'application/json'}
+              requests.patch('https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/${{ github.event.inputs.username }}.json', json={'session_active': False, 'streaming': False}, headers=headers, timeout=10)
+          except Exception as e:
+              print('Cleanup failed:', e)
+          "
