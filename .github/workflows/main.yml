@@ -35,7 +35,6 @@ jobs:
           retain_days: 0
           keep_minimum_runs: 1
 
-      # 🚀 السرعة الخارقة: أداة تثبيت وحفظ ملفات النظام (System Packages)
       - name: Install System Dependencies (Fast Cache)
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -272,11 +271,12 @@ jobs:
                               'ffmpeg', '-y', '-nostats', '-loglevel', 'error',
                               '-thread_queue_size', '1024',
                               '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60', '-video_size', '720x1360', '-i', f":{disp.display}",
-                              '-itsoffset', '0.2', 
+                              '-itsoffset', '0.0', 
                               '-thread_queue_size', '1024',
                               '-f', 'pulse', '-i', f"{sink_name}.monitor",
                               '-map', '0:v', '-map', '1:a',
-                              '-vf', 'crop=720:1210:0:150,fps=60',
+                              # القص ثم إعادة التحجيم لضمان جودة 720p
+                              '-vf', 'crop=720:1210:0:150,scale=720:1280,fps=60',
                               '-vsync', '1', 
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                               '-x264-params', 'threads=2:sliced-threads=1',
