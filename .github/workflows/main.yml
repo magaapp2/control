@@ -102,6 +102,7 @@ jobs:
               try:
                   sa_info = json.loads(os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON', '{}'))
                   if not sa_info:
+                      print("ERROR: FIREBASE_SERVICE_ACCOUNT_JSON is empty or missing")
                       return None
                   credentials = service_account.Credentials.from_service_account_info(
                       sa_info,
@@ -110,32 +111,51 @@ jobs:
                   )
                   credentials.refresh(google.auth.transport.requests.Request())
                   GLOBAL_REFS["access_token"] = credentials.token
+                  print("OK: Service account access token obtained")
                   return credentials.token
               except Exception as e:
-                  print(f"Error getting access token: {e}")
+                  print(f"ERROR getting access token: {e}")
                   return None
 
           def user_url(username):
               return FIREBASE_BASE + "/control/users/" + username + ".json"
 
+          # ✅ القراءة باستخدام access_token في query parameter (الطريقة الصحيحة لحساب الخدمة)
           def get_firebase_data(username):
               if not username: return {}
               try:
                   token = get_access_token()
-                  headers = {'Authorization': f'Bearer {token}'} if token else {}
-                  res = requests.get(user_url(username), headers=headers, timeout=5)
-                  return res.json() or {}
-              except Exception:
+                  if not token:
+                      print("ERROR: No access token available for Firebase GET")
+                      return {}
+                  url = user_url(username) + '?access_token=' + urllib.parse.quote(token)
+                  res = requests.get(url, timeout=10)
+                  if res.status_code != 200:
+                      print(f"ERROR: Firebase GET failed HTTP {res.status_code}: {res.text[:300]}")
+                      return {}
+                  data = res.json() or {}
+                  print(f"OK: Firebase GET success. Keys: {list(data.keys())}")
+                  return data
+              except Exception as e:
+                  print(f"ERROR: Firebase GET exception: {e}")
                   return {}
 
+          # ✅ الكتابة باستخدام access_token في query parameter
           def patch_firebase(username, payload):
               try:
                   token = get_access_token()
-                  headers = {'Authorization': f'Bearer {token}'} if token else {}
-                  headers['Content-Type'] = 'application/json'
-                  requests.patch(user_url(username), json=payload, headers=headers, timeout=5)
-              except Exception:
-                  pass
+                  if not token:
+                      print("ERROR: No access token available for Firebase PATCH")
+                      return
+                  url = user_url(username) + '?access_token=' + urllib.parse.quote(token)
+                  headers = {'Content-Type': 'application/json'}
+                  r = requests.patch(url, json=payload, headers=headers, timeout=10)
+                  if r.status_code != 200:
+                      print(f"ERROR: Firebase PATCH failed HTTP {r.status_code}: {r.text[:300]}")
+                  else:
+                      print(f"OK: Firebase PATCH success: {payload}")
+              except Exception as e:
+                  print(f"ERROR: Firebase PATCH exception: {e}")
 
           def cleanup_processes():
               for key in ["fan_process", "ffmpeg_proc"]:
@@ -200,10 +220,12 @@ jobs:
 
           def main():
               username = os.environ.get("INPUT_USERNAME")
-              if not username: return
+              if not username:
+                  print("ERROR: INPUT_USERNAME is empty")
+                  return
+              print(f"=== Starting session for user: {username} ===")
               GLOBAL_REFS["username"] = username
               
-              # استخدام الدالة الجديدة للتحديث
               patch_firebase(username, {"session_active": True})
 
               sink_name = "Sink1"
@@ -215,6 +237,19 @@ jobs:
               disp.start()
               GLOBAL_REFS["disp"] = disp
               os.environ['DISPLAY'] = f":{disp.display}"
+              print(f"OK: Xvfb started on display :{disp.display}")
+
+              # ✅ التحقق من دقة وعمق Xvfb
+              try:
+                  xdpy = subprocess.check_output(
+                      ['xdpyinfo', '-display', f":{disp.display}"],
+                      stderr=subprocess.STDOUT, timeout=10
+                  ).decode('utf-8', errors='ignore')
+                  for line in xdpy.split('\n'):
+                      if 'dimensions:' in line or 'depth of root' in line:
+                          print(f"Xvfb: {line.strip()}")
+              except Exception as e:
+                  print(f"WARN: xdpyinfo check failed: {e}")
 
               subprocess.Popen(['unclutter', '-idle', '0', '-display', f":{disp.display}"])
 
@@ -249,6 +284,7 @@ jobs:
 
               driver = webdriver.Chrome(options=opts)
               driver.set_window_size(720, 1360)
+              print("OK: Chrome started")
 
               try:
                   driver.execute_cdp_cmd("Browser.setPermission", {"permission": {"name": "notifications"}, "setting": "denied", "origin": "*"})
@@ -265,7 +301,9 @@ jobs:
               try:
                   while True:
                       data = get_firebase_data(username)
-                      if not data: break
+                      if not data:
+                          print("WARN: Firebase data empty, ending session")
+                          break
 
                       streaming_active = data.get("streaming", False)
                       game_url = data.get("game_url", "")
@@ -273,6 +311,8 @@ jobs:
                       session_active = data.get("session_active", False)
                       start_time = data.get("start_time", 0)
                       end_time = data.get("end_time", 0)
+
+                      print(f"STATE: session_active={session_active} streaming={streaming_active} stream_key={'YES' if stream_key else 'NO'} game_url={'YES' if game_url else 'NO'}")
 
                       if not session_active: break
 
@@ -291,25 +331,27 @@ jobs:
                           try:
                               driver.get(game_url)
                               last_url = game_url
+                              print(f"OK: Loaded game_url: {game_url}")
                               if not sleep_interruptible(2, username): break
                               os.system("xdotool key Tab Tab Tab Return")
-                          except Exception:
-                              pass
+                          except Exception as e:
+                              print(f"WARN: Failed to load game_url: {e}")
 
                       if streaming_active and not ffmpeg_proc and stream_key:
+                          print("=== Starting fan noise generator (ffplay) ===")
                           fan_cmd = ['ffplay', '-f', 'lavfi', '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', '-nodisp', '-loop', '0', '-loglevel', 'quiet']
                           fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
                           GLOBAL_REFS["fan_process"] = fan_process
 
+                          print("=== Starting FFmpeg stream ===")
                           ffmpeg_cmd = [
-                              'ffmpeg', '-y', '-nostats', '-loglevel', 'error',
+                              'ffmpeg', '-y', '-nostats', '-loglevel', 'info',
                               '-thread_queue_size', '1024',
                               '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60', '-video_size', '720x1360', '-i', f":{disp.display}",
                               '-itsoffset', '0.0', 
                               '-thread_queue_size', '1024',
                               '-f', 'pulse', '-i', f"{sink_name}.monitor",
                               '-map', '0:v', '-map', '1:a',
-                              # زيادة القص إلى 160 بكسل لإخفاء شريط المتصفح العلوي نهائياً
                               '-vf', 'crop=720:1200:0:120,scale=720:1280,fps=60',
                               '-vsync', '1', 
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
@@ -322,8 +364,29 @@ jobs:
                               '-f', 'flv',
                               f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
                           ]
-                          ffmpeg_proc = subprocess.Popen(ffmpeg_cmd)
+                          # ✅ إعادة توجيه stderr و stdout إلى نفس تدفق الإخراج الظاهر في سجل Actions
+                          ffmpeg_proc = subprocess.Popen(
+                              ffmpeg_cmd,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT,
+                              bufsize=1,
+                              universal_newlines=True
+                          )
                           GLOBAL_REFS["ffmpeg_proc"] = ffmpeg_proc
+                          print(f"OK: FFmpeg PID = {ffmpeg_proc.pid}")
+
+                      # ✅ طباعة سجل ffmpeg في الوقت الفعلي (للتشخيص)
+                      if ffmpeg_proc and ffmpeg_proc.poll() is None:
+                          try:
+                              line = ffmpeg_proc.stdout.readline()
+                              if line:
+                                  print(f"[ffmpeg] {line.rstrip()}")
+                          except Exception:
+                              pass
+                      elif ffmpeg_proc and ffmpeg_proc.poll() is not None:
+                          print(f"ERROR: FFmpeg exited with code {ffmpeg_proc.returncode}")
+                          ffmpeg_proc = None
+                          GLOBAL_REFS["ffmpeg_proc"] = None
 
                       elif not streaming_active and ffmpeg_proc:
                           if fan_process:
@@ -335,8 +398,8 @@ jobs:
 
                       if not sleep_interruptible(3, username): break
 
-              except Exception:
-                  pass
+              except Exception as e:
+                  print(f"ERROR: Main loop exception: {e}")
               finally:
                   if fan_process:
                       try: fan_process.terminate()
@@ -348,6 +411,7 @@ jobs:
                   except: pass
                   disp.stop()
                   patch_firebase(username, {"session_active": False, "streaming": False})
+                  print("=== Session ended ===")
 
           if __name__ == "__main__":
               main()
@@ -367,14 +431,15 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
           python -c "
-          import os, json, requests, google.auth.transport.requests
+          import os, json, requests, urllib.parse, google.auth.transport.requests
           from google.oauth2 import service_account
           try:
               sa_info = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT_JSON'])
               creds = service_account.Credentials.from_service_account_info(sa_info, scopes=['https://www.googleapis.com/auth/firebase.database'])
               creds.refresh(google.auth.transport.requests.Request())
-              headers = {'Authorization': f'Bearer {creds.token}', 'Content-Type': 'application/json'}
-              requests.patch('https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/${{ github.event.inputs.username }}.json', json={'session_active': False, 'streaming': False}, headers=headers, timeout=10)
+              url = 'https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/${{ github.event.inputs.username }}.json?access_token=' + urllib.parse.quote(creds.token)
+              r = requests.patch(url, json={'session_active': False, 'streaming': False}, headers={'Content-Type': 'application/json'}, timeout=10)
+              print('Cleanup HTTP status:', r.status_code)
           except Exception as e:
               print('Cleanup failed:', e)
           "
