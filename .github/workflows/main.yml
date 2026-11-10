@@ -42,12 +42,17 @@ jobs:
           packages: xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11
           version: 1.0
 
-      - name: Install Google Chrome & Setup
+      - name: Setup Chrome & Notifications
         run: |
-          # تثبيت كروم
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -y -f || true
-          rm google-chrome-stable_current_amd64.deb
+          # التحقق من وجود كروم، لو مش موجود بيحمله (مش هيحصل في العادة لأن جيت هب فيه كروم)
+          if ! command -v google-chrome-stable &> /dev/null; then
+            echo "Chrome not found. Installing..."
+            wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -y -f || true
+            rm google-chrome-stable_current_amd64.deb
+          else
+            echo "Chrome is already installed. Skipping to save time."
+          fi
 
           # إعداد الصوت
           pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
