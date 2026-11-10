@@ -35,13 +35,33 @@ jobs:
           retain_days: 0
           keep_minimum_runs: 1
 
+      # 🚀 تسريع جيت هب: كاش لحزم النظام
+      - name: Cache System Dependencies
+        uses: actions/cache@v4
+        id: cache-apt
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/main.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+
+      # 🚀 تسريع جيت هب: كاش لحزم بايثون
+      - name: Cache Python Dependencies
+        uses: actions/cache@v4
+        id: cache-pip
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('.github/workflows/main.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: System Setup
         run: |
           echo "1. Updating Repositories..."
           sudo apt-get update -y
           
           echo "2. Installing Packages..."
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11 google-chrome-stable
           
           echo "3. Setting up Audio..."
           pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
@@ -150,13 +170,14 @@ jobs:
                           "media_stream_mic": 1,
                           "media_stream_camera": 1,
                           "sound": 1,
+                          "popups": 1,
                       },
                       "default_content_settings": {
                           "notifications": 2,
                           "popups": 1,
                           "geolocation": 2,
                       },
-                      "block_popups": True,
+                      "block_popups": False,
                       "exit_type": "Normal",
                       "exited_cleanly": True,
                   },
@@ -193,7 +214,6 @@ jobs:
               return profile_dir
 
           def main():
-              # 1. جلب اسم المستخدم من الـ Workflow input
               username = os.environ.get("INPUT_USERNAME")
               if not username:
                   print("🛑 لم يتم إرسال username مع الـ Workflow. إنهاء الجلسة.")
@@ -202,7 +222,6 @@ jobs:
               GLOBAL_REFS["username"] = username
               print(f"👤 المستخدم النشط: {username}")
 
-              # 2. تحديث حالة الجلسة لهذا المستخدم
               try:
                   requests.patch(user_url(username), json={"session_active": True})
               except: pass
@@ -223,12 +242,19 @@ jobs:
               opts.add_argument('--no-sandbox')
               opts.add_argument('--disable-dev-shm-usage')
               opts.add_argument('--autoplay-policy=no-user-gesture-required')
+              
+              # 📱 إعدادات الشاشة وإخفاء الواجهة
               opts.add_argument('--window-size=720,1280')
-              opts.add_argument('--kiosk')
+              opts.add_argument('--start-maximized') # ملء الشاشة
+              opts.add_argument('--kiosk')           # وضع الكشك (إخفاء كل شيء)
+              
+              # 🔕 تعطيل كل الإشعارات ومنعها من الظهور
               opts.add_argument('--disable-notifications')
               opts.add_argument('--disable-push-api')
               opts.add_argument('--disable-desktop-notifications')
               opts.add_argument('--disable-features=TranslateUI,Translate,NotificationTriggers,NotificationIndicator,WebPush,BackgroundFetch,PeriodicBackgroundSync')
+              
+              # إخفاء الأشرطة والواجهات
               opts.add_argument('--disable-infobars')
               opts.add_argument('--disable-session-crashed-bubble')
               opts.add_argument('--disable-component-update')
@@ -256,7 +282,6 @@ jobs:
               opts.add_argument('--use-mock-keychain')
               opts.add_argument('--deny-permission-prompts')
               opts.add_argument('--disable-permissions-api')
-              opts.add_argument('--block-new-web-contents')
               
               prefs = {
                   "credentials_enable_service": False,
@@ -274,6 +299,7 @@ jobs:
               driver = webdriver.Chrome(options=opts)
               driver.set_window_size(720, 1280)
 
+              # 🚫 حظر الإشعارات نهائياً من المتصفح نفسه
               try:
                   driver.execute_cdp_cmd("Browser.setPermission", { "permission": {"name": "notifications"}, "setting": "denied", "origin": "*" })
                   driver.execute_cdp_cmd("Browser.setPermission", { "permission": {"name": "geolocation"}, "setting": "denied", "origin": "*" })
@@ -287,17 +313,14 @@ jobs:
               ffmpeg_proc = None
               fan_process = None
               last_url = ""
-              script_triggered = False
               auto_start_done = False
 
               print("🟢 جيت هب بدأ الاستماع لأوامر لوحة التحكم لحظياً...")
 
               try:
                   while True:
-                      # جلب البيانات الخاصة بالمستخدم فقط
                       data = get_firebase_data(username)
                       
-                      # إذا تم مسح بيانات المستخدم أو تغييره
                       if not data:
                           print("🛑 لا توجد بيانات للمستخدم، ربما تم حذفه. خروج.")
                           break
@@ -359,6 +382,7 @@ jobs:
                           fan_process = subprocess.Popen(fan_cmd, env=fan_env)
                           GLOBAL_REFS["fan_process"] = fan_process
 
+                          # 🎥 تم إزالة فلتر drawbox لإلغاء القص (الـ 15%) وعرض الشاشة كاملة
                           ffmpeg_cmd = [
                               'ffmpeg', '-y',
                               '-nostats', '-loglevel', 'error',
@@ -373,7 +397,8 @@ jobs:
                               '-i', f"{sink_name}.monitor",
                               '-map', '0:v',
                               '-map', '1:a',
-                              '-vf', 'fps=60,drawbox=x=0:y=0:w=720:h=192:color=black:t=fill',
+                              # هنا تم حذف القص، البث يعرض 720x1280 كاملة
+                              '-vf', 'fps=60', 
                               '-c:v', 'libx264',
                               '-preset', 'ultrafast',
                               '-tune', 'zerolatency',
@@ -440,7 +465,7 @@ jobs:
           INPUT_USERNAME: ${{ github.event.inputs.username }}
         run: python main.py
 
-      # ✨ خطوة جديدة: تحديث الفايربيز لو الجلسة اتلغت أو انتهت من جيت هب
+      # ✨ تحديث الفايربيز لو الجلسة اتلغت أو انتهت من جيت هب
       - name: Cleanup Firebase on Cancel/Timeout
         if: always()
         run: |
