@@ -41,9 +41,9 @@ jobs:
         id: cache-apt
         with:
           path: ~/apt-cache
-          key: ${{ runner.os }}-apt-v2-${{ hashFiles('.github/workflows/main.yml') }}
+          key: ${{ runner.os }}-apt-v3-${{ hashFiles('.github/workflows/main.yml') }}
           restore-keys: |
-            ${{ runner.os }}-apt-v2-
+            ${{ runner.os }}-apt-v3-
 
       # 🚀 تسريع جيت هب: كاش لحزم بايثون
       - name: Cache Python Dependencies
@@ -67,23 +67,29 @@ jobs:
           echo "2. Updating Repositories..."
           sudo apt-get update -y
 
-          echo "3. Downloading packages..."
+          echo "3. Downloading packages to cache (excluding Chrome)..."
           cd ~/apt-cache
-          sudo apt-get download xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11 google-chrome-stable || true
+          # نقوم بتحميل المكتبات الأساسية فقط، ونستثني المتصفح لكي لا يحدث خطأ
+          sudo apt-get download xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11 || true
           
-          echo "4. Installing from local cache (Offline)..."
+          echo "4. Installing system packages from local cache..."
           if ls *.deb 1> /dev/null 2>&1; then
              sudo dpkg -i *.deb || true
           fi
           
-          # إصلاح أي اعتماديات ناقصة
+          # إصلاح أي اعتماديات ناقصة لمكتبات النظام
           sudo apt-get install -y -f --no-install-recommends || true
 
-          echo "5. Setting up Audio..."
+          echo "5. Installing Google Chrome directly (Faster & Safer)..."
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -y -f || true
+          rm google-chrome-stable_current_amd64.deb
+
+          echo "6. Setting up Audio..."
           pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
           pactl load-module module-null-sink sink_name=Sink1
 
-          echo "6. Disabling desktop notifications (dbus) ..."
+          echo "7. Disabling desktop notifications (dbus) ..."
           mkdir -p ~/.config
           export $(dbus-launch) || true
           systemctl --user mask org.freedesktop.Notifications.service 2>/dev/null || true
@@ -326,7 +332,8 @@ jobs:
                               '-thread_queue_size', '1024',
                               '-f', 'pulse', '-i', f"{sink_name}.monitor",
                               '-map', '0:v', '-map', '1:a',
-                              '-vf', 'crop=720:1280:0:120,fps=60', 
+                              # هنا نقص أول 120 بكسل من الأعلى (لإخفاء شريط المتصفح) ونترك 1240 بكسل للطول
+                              '-vf', 'crop=720:1240:0:120,fps=60', 
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                               '-x264-params', 'threads=2:sliced-threads=1',
                               '-max_muxing_queue_size', '1024',
