@@ -1,4 +1,4 @@
-name: "Stream - ${{ github.event.inputs.username }}"
+name: Stream Session
 
 on:
   workflow_dispatch:
