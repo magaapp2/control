@@ -1,4 +1,4 @@
-name: Stream Session
+name: "Stream - ${{ github.event.inputs.username }}"
 
 on:
   workflow_dispatch:
@@ -17,7 +17,6 @@ env:
 
 jobs:
   stream:
-    # ✨ هذا السطر يجعل اسم الـ Job يظهر باسم المستخدم في لوحة GitHub
     name: "👤 ${{ github.event.inputs.username }}"
     runs-on: ubuntu-22.04
     timeout-minutes: 360
@@ -440,3 +439,12 @@ jobs:
           ENABLE_STREAM: ${{ env.ENABLE_STREAM }}
           INPUT_USERNAME: ${{ github.event.inputs.username }}
         run: python main.py
+
+      # ✨ خطوة جديدة: تحديث الفايربيز لو الجلسة اتلغت أو انتهت من جيت هب
+      - name: Cleanup Firebase on Cancel/Timeout
+        if: always()
+        run: |
+          curl -X PATCH \
+          -H "Content-Type: application/json" \
+          -d '{"session_active": false, "streaming": false}' \
+          "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/${{ github.event.inputs.username }}.json"
