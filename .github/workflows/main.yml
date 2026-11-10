@@ -35,59 +35,36 @@ jobs:
           retain_days: 0
           keep_minimum_runs: 1
 
-      # 🚀 تسريع جيت هب: كاش لحزم النظام
-      - name: Cache System Dependencies
-        uses: actions/cache@v4
-        id: cache-apt
+      # 🚀 استخدام أداة كاش APT الناضجة (بدلاً من الكتابة اليدوية)
+      - name: Install & Cache System Dependencies
+        uses: gerlero/apt-install@v1
         with:
-          path: ~/apt-cache
-          key: ${{ runner.os }}-apt-v3-${{ hashFiles('.github/workflows/main.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-apt-v3-
+          packages: >
+            xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11
+          update: true
 
-      # 🚀 تسريع جيت هب: كاش لحزم بايثون
+      - name: Install Google Chrome Directly
+        run: |
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -y -f || true
+          rm google-chrome-stable_current_amd64.deb
+
       - name: Cache Python Dependencies
         uses: actions/cache@v4
-        id: cache-pip
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('.github/workflows/main.yml') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: System Setup
+      - name: Python Setup
+        run: pip install -U urllib3 chardet requests selenium pyvirtualdisplay
+
+      - name: Setup Audio & Notifications
         run: |
-          echo "1. Configuring APT to keep downloaded packages..."
-          sudo rm -f /etc/apt/apt.conf.d/docker-clean
-          echo 'APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep > /dev/null
-          
-          mkdir -p ~/apt-cache
-          sudo chmod a+rwx ~/apt-cache
-
-          echo "2. Updating Repositories..."
-          sudo apt-get update -y
-
-          echo "3. Downloading packages to cache (excluding Chrome)..."
-          cd ~/apt-cache
-          sudo apt-get download xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11 || true
-          
-          echo "4. Installing system packages from local cache..."
-          if ls *.deb 1> /dev/null 2>&1; then
-             sudo dpkg -i *.deb || true
-          fi
-          
-          sudo apt-get install -y -f --no-install-recommends || true
-
-          echo "5. Installing Google Chrome directly (Faster & Safer)..."
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -y -f || true
-          rm google-chrome-stable_current_amd64.deb
-
-          echo "6. Setting up Audio..."
           pulseaudio -D --exit-idle-time=-1 --disallow-exit || true
           pactl load-module module-null-sink sink_name=Sink1
-
-          echo "7. Disabling desktop notifications (dbus) ..."
+          
           mkdir -p ~/.config
           export $(dbus-launch) || true
           systemctl --user mask org.freedesktop.Notifications.service 2>/dev/null || true
@@ -97,9 +74,6 @@ jobs:
           NS
           sudo chmod +x /usr/local/bin/notify-send
 
-      - name: Python Setup
-        run: pip install -U urllib3 chardet requests selenium pyvirtualdisplay
-
       - name: Create Python Script
         run: |
           cat << 'EOF' > main.py
@@ -107,7 +81,6 @@ jobs:
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
-          from selenium.webdriver.chrome.service import Service
 
           FIREBASE_BASE = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app"
           AUTO_START_DELAY_SECONDS = 90
@@ -128,7 +101,7 @@ jobs:
               try:
                   res = requests.get(user_url(username), timeout=5)
                   return res.json() or {}
-              except Exception as e:
+              except Exception:
                   return {}
 
           def cleanup_processes():
@@ -170,53 +143,33 @@ jobs:
               profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
               default_dir = os.path.join(profile_dir, "Default")
               os.makedirs(default_dir, exist_ok=True)
-
               prefs = {
                   "profile": {
                       "default_content_setting_values": {
-                          "notifications": 2,
-                          "geolocation": 2,
-                          "media_stream": 1,
-                          "media_stream_mic": 1,
-                          "media_stream_camera": 1,
-                          "sound": 1,
-                          "popups": 1,
+                          "notifications": 2, "geolocation": 2,
+                          "media_stream": 1, "media_stream_mic": 1, "media_stream_camera": 1, "sound": 1,
                       },
-                      "default_content_settings": {
-                          "notifications": 2,
-                          "popups": 1,
-                          "geolocation": 2,
-                      },
-                      "block_popups": False,
-                      "exit_type": "Normal",
-                      "exited_cleanly": True,
+                      "default_content_settings": {"notifications": 2, "popups": 1, "geolocation": 2},
+                      "block_popups": False, "exit_type": "Normal", "exited_cleanly": True,
                   },
                   "bookmark_bar": { "show_on_all_tabs": False },
                   "translate": { "enabled": False },
                   "credentials_enable_service": False,
-                  "credentials_enable_autosignin": False,
                   "profile.password_manager_enabled": False,
-                  "profile.password_manager_leak_detection": False,
-                  "autofill": { "profile_enabled": False, "credit_card_enabled": False },
                   "browser": { "has_seen_welcome_page": True, "check_default_browser": False },
                   "distribution": {
                       "skip_first_run_ui": True, "suppress_first_run_bubble": True,
                       "import_bookmarks": False, "import_history": False,
-                      "import_search_engine": False, "make_chrome_default": False,
-                      "make_chrome_default_for_user": False, "show_welcome_page": False,
-                      "skip_first_run_tasks": True,
+                      "show_welcome_page": False, "skip_first_run_tasks": True,
                   },
               }
-
-              prefs_path = os.path.join(default_dir, "Preferences")
-              with open(prefs_path, "w", encoding="utf-8") as f: json.dump(prefs, f)
-
+              with open(os.path.join(default_dir, "Preferences"), "w", encoding="utf-8") as f:
+                  json.dump(prefs, f)
               return profile_dir
 
           def main():
               username = os.environ.get("INPUT_USERNAME")
               if not username: return
-                  
               GLOBAL_REFS["username"] = username
               try:
                   requests.patch(user_url(username), json={"session_active": True})
@@ -226,33 +179,28 @@ jobs:
               os.environ['PULSE_SINK'] = sink_name
               os.environ['DBUS_SESSION_BUS_ADDRESS'] = '/dev/null'
               os.environ['NOTIFY_SOCKET'] = '/dev/null'
-              
-              # تكبير الشاشة قليلاً لضمان وجود مساحة كافية للقص
+
               disp = Display(visible=0, size=(720, 1360), backend='xvfb')
               disp.start()
               GLOBAL_REFS["disp"] = disp
               os.environ['DISPLAY'] = f":{disp.display}"
-              
+
               subprocess.Popen(['unclutter', '-idle', '0', '-display', f":{disp.display}"])
-              
+
               opts = Options()
               opts.add_argument('--no-sandbox')
               opts.add_argument('--disable-dev-shm-usage')
               opts.add_argument('--autoplay-policy=no-user-gesture-required')
               opts.add_argument('--window-size=720,1360')
               opts.add_argument('--start-maximized')
-              
               opts.add_argument('--disable-infobars')
               opts.add_argument('--disable-notifications')
               opts.add_argument('--disable-push-api')
               opts.add_argument('--disable-desktop-notifications')
-              # إيقاف النوافذ العائمة الخاصة بالوسائط (Audio & Video)
               opts.add_argument('--disable-features=TranslateUI,Translate,NotificationTriggers,NotificationIndicator,WebPush,BackgroundFetch,PeriodicBackgroundSync,GlobalMediaControls,MediaRouter')
               opts.add_argument('--no-default-browser-check')
               opts.add_argument('--no-first-run')
               opts.add_argument('--disable-sync')
-              opts.add_argument('--hide-crash-restore-bubble')
-              opts.add_argument('--disable-session-crashed-bubble')
 
               prefs = {
                   "credentials_enable_service": False,
@@ -264,20 +212,18 @@ jobs:
               opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
               opts.add_experimental_option("useAutomationExtension", False)
 
-              profile_dir = build_chrome_prefs_dir()
-              opts.add_argument(f"--user-data-dir={profile_dir}")
+              opts.add_argument(f"--user-data-dir={build_chrome_prefs_dir()}")
 
               driver = webdriver.Chrome(options=opts)
               driver.set_window_size(720, 1360)
 
               try:
-                  driver.execute_cdp_cmd("Browser.setPermission", { "permission": {"name": "notifications"}, "setting": "denied", "origin": "*" })
+                  driver.execute_cdp_cmd("Browser.setPermission", {"permission": {"name": "notifications"}, "setting": "denied", "origin": "*"})
                   driver.execute_cdp_cmd("Page.enable", {})
-              except Exception as e:
+              except Exception:
                   pass
 
               GLOBAL_REFS["driver"] = driver
-
               ffmpeg_proc = None
               fan_process = None
               last_url = ""
@@ -317,7 +263,7 @@ jobs:
                               last_url = game_url
                               if not sleep_interruptible(5, username): break
                               os.system("xdotool key Tab Tab Tab Return")
-                          except Exception as e:
+                          except Exception:
                               pass
 
                       if streaming_active and not ffmpeg_proc and stream_key:
@@ -325,15 +271,17 @@ jobs:
                           fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
                           GLOBAL_REFS["fan_process"] = fan_process
 
+                          # 🔥 مفتاح الحل: -itsoffset لتأخير الصوت قليلاً لمزامنة الصورة
+                          # نستخدم 0.2 ثانية كقيمة افتراضية، يمكنك تعديلها إذا كان التأخر مستمراً
                           ffmpeg_cmd = [
                               'ffmpeg', '-y', '-nostats', '-loglevel', 'error',
                               '-thread_queue_size', '1024',
                               '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60', '-video_size', '720x1360', '-i', f":{disp.display}",
+                              '-itsoffset', '0.2',  # 👈 تأخير الصوت 0.2 ثانية (جرب 0.3 أو 0.4 إذا لزم)
                               '-thread_queue_size', '1024',
                               '-f', 'pulse', '-i', f"{sink_name}.monitor",
                               '-map', '0:v', '-map', '1:a',
-                              # 👇 زيادة القص إلى 150 بكسل من الأعلى (لإخفاء كل الإشعارات) والاحتفاظ بالباقي
-                              '-vf', 'crop=720:1210:0:120,fps=60', 
+                              '-vf', 'crop=720:1210:0:150,fps=60',
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                               '-x264-params', 'threads=2:sliced-threads=1',
                               '-max_muxing_queue_size', '1024',
@@ -357,13 +305,13 @@ jobs:
 
                       if not sleep_interruptible(3, username): break
 
-              except Exception as e:
+              except Exception:
                   pass
               finally:
-                  if fan_process: 
+                  if fan_process:
                       try: fan_process.terminate()
                       except: pass
-                  if ffmpeg_proc: 
+                  if ffmpeg_proc:
                       try: ffmpeg_proc.kill()
                       except: pass
                   try: driver.quit()
