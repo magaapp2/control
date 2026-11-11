@@ -312,11 +312,19 @@ jobs:
                       start_time = data.get("start_time", 0)
                       end_time = data.get("end_time", 0)
 
+                      # ✅ إصلاح توقيت السيرفر: حساب المدة المتبقية بناءً على الفرق
+                      calculated_end_time = 0
+                      if start_time and end_time:
+                          duration_ms = end_time - start_time
+                          calculated_end_time = (time.time() * 1000) + duration_ms
+
                       print(f"STATE: session_active={session_active} streaming={streaming_active} stream_key={'YES' if stream_key else 'NO'} game_url={'YES' if game_url else 'NO'}")
 
                       if not session_active: break
 
-                      if session_active and end_time and (time.time() * 1000) >= end_time:
+                      # ✅ استخدام الوقت المحسوب بدلاً من end_time المباشر
+                      if session_active and calculated_end_time and (time.time() * 1000) >= calculated_end_time:
+                          print("⏰ Session time ended (calculated). Stopping stream.")
                           patch_firebase(username, {"session_active": False, "streaming": False})
                           break
 
