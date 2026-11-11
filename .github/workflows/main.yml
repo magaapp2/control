@@ -96,8 +96,9 @@ jobs:
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
 
           # 🔎 إعدادات فحص عدد المشاهدين (بدون YouTube API)
-          VIEWER_MIN_THRESHOLD = 100          # الحد الأدنى للمشاهدين
-          VIEWER_CHECK_INTERVAL_SECONDS = 60  # فحص كل 60 ثانية
+          VIEWER_MIN_THRESHOLD = 100                    # الحد الأدنى للمشاهدين
+          VIEWER_CHECK_INTERVAL_SECONDS = 60            # فحص كل 60 ثانية بعد أول فحص
+          VIEWER_FIRST_CHECK_AFTER_SECONDS = 10 * 60    # أول فحص بعد 10 دقائق من بدء البث
 
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
@@ -377,6 +378,7 @@ jobs:
               # 🔎 حالة فحص عدد المشاهدين
               last_viewer_check_ts = 0
               viewer_check_count = 0
+              first_viewer_check_done = False
 
               try:
                   while True:
@@ -501,17 +503,26 @@ jobs:
                               ffmpeg_proc = None
 
                       # ============================================================
-                      # 🔎 فحص عدد المشاهدين كل 60 ثانية (بدون YouTube API)
-                      # - يبدأ الفحص فقط بعد أن يصبح البث نشطًا (ffmpeg يعمل)
+                      # 🔎 فحص عدد المشاهدين (بدون YouTube API)
+                      # - أول فحص بعد 10 دقائق من start_time (بدء البث)
+                      # - ثم كل 60 ثانية
                       # - إذا كان العدد < 100 → إنهاء الجلسة فورًا
                       # - يكتب العدد في Firebase لعرضه في لوحة التحكم
                       # ============================================================
-                      if streaming_active and ffmpeg_proc and broadcast_id:
-                          now_check_ts = time.time()
-                          if (now_check_ts - last_viewer_check_ts) >= VIEWER_CHECK_INTERVAL_SECONDS:
+                      if streaming_active and ffmpeg_proc and broadcast_id and start_time:
+                          elapsed_since_start_sec = (time.time() * 1000 - start_time) / 1000.0
+                          should_check = False
+
+                          if not first_viewer_check_done and elapsed_since_start_sec >= VIEWER_FIRST_CHECK_AFTER_SECONDS:
+                              should_check = True
+                          elif first_viewer_check_done and (time.time() - last_viewer_check_ts) >= VIEWER_CHECK_INTERVAL_SECONDS:
+                              should_check = True
+
+                          if should_check:
                               viewer_check_count += 1
-                              last_viewer_check_ts = now_check_ts
-                              print(f"=== [Viewer Check #{viewer_check_count}] Querying viewers from page... ===")
+                              last_viewer_check_ts = time.time()
+                              first_viewer_check_done = True
+                              print(f"=== [Viewer Check #{viewer_check_count}] Querying viewers from page (elapsed {int(elapsed_since_start_sec)}s)... ===")
                               viewers = get_viewers_from_page(broadcast_id)
                               print(f"=== [Viewer Check] concurrent viewers = {viewers} ===")
 
