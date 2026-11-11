@@ -437,15 +437,17 @@ jobs:
         if: always()
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          INPUT_USERNAME: ${{ github.event.inputs.username }}
         run: |
           python -c "
           import os, json, requests, urllib.parse, google.auth.transport.requests
           from google.oauth2 import service_account
           try:
+              username = os.environ['INPUT_USERNAME']
               sa_info = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT_JSON'])
               creds = service_account.Credentials.from_service_account_info(sa_info, scopes=['https://www.googleapis.com/auth/firebase.database'])
               creds.refresh(google.auth.transport.requests.Request())
-              url = 'https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/${{ github.event.inputs.username }}.json?access_token=' + urllib.parse.quote(creds.token)
+              url = 'https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/' + urllib.parse.quote(username) + '.json?access_token=' + urllib.parse.quote(creds.token)
               r = requests.patch(url, json={'session_active': False, 'streaming': False}, headers={'Content-Type': 'application/json'}, timeout=10)
               print('Cleanup HTTP status:', r.status_code)
           except Exception as e:
