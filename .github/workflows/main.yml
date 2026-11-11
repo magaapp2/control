@@ -80,7 +80,7 @@ jobs:
       - name: Create Python Script
         run: |
           cat << 'EOF' > main.py
-          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket, re
+          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
@@ -95,9 +95,9 @@ jobs:
           SESSION_MAX_MINUTES = 130
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
 
-          # 🔎 إعدادات فحص عدد المشاهدين (بدون YouTube API)
+          # 🔎 إعدادات فحص عدد المشاهدين (عبر YouTube Data API)
           VIEWER_MIN_THRESHOLD = 100                    # الحد الأدنى للمشاهدين
-          VIEWER_CHECK_INTERVAL_SECONDS = 10            # فحص كل 10 ثوانٍ (منذ البداية)
+          VIEWER_CHECK_INTERVAL_SECONDS = 60            # فحص كل 60 ثانية
           VIEWER_KILL_AFTER_SECONDS = 10 * 60           # لا يُلغي الجلسة إلا بعد 10 دقائق من start_time
 
           GLOBAL_REFS = {
@@ -253,63 +253,37 @@ jobs:
                   json.dump(prefs, f)
               return profile_dir
 
-          # 🔎 قراءة عدد المشاهدين من HTML صفحة البث مباشرة (بدون YouTube API)
-          def get_viewers_from_page(broadcast_id):
+          # 🔎 قراءة عدد المشاهدين عبر YouTube Data API v3 (بمفتاح API من GitHub Secrets)
+          def get_viewers_from_api(broadcast_id):
               if not broadcast_id:
                   return None
+              api_key = os.environ.get("YOUTUBE_API_KEY")
+              if not api_key:
+                  print("WARN: YOUTUBE_API_KEY not set in env")
+                  return None
               try:
-                  url = f"https://www.youtube.com/watch?v={broadcast_id}"
-                  headers = {
-                      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    "Chrome/122.0.0.0 Safari/537.36",
-                      "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+                  url = "https://www.googleapis.com/youtube/v3/videos"
+                  params = {
+                      "part": "liveStreamingDetails",
+                      "id": broadcast_id,
+                      "key": api_key
                   }
-                  res = requests.get(url, headers=headers, timeout=15)
-                  html = res.text
-
-                  # 1. البحث المباشر عن concurrentViewers بأي شكل داخل النصوص أو الـ JSON
-                  # أحياناً يكون بصيغة رقمية أو نصية داخل الـ player response
-                  match = re.search(r'"concurrentViewers"\s*:\s*"(\d+)"', html)
-                  if match:
-                      return int(match.group(1))
-
-                  match = re.search(r'"concurrentViewers"\s*:\s*(\d+)', html)
-                  if match:
-                      return int(match.group(1))
-
-                  # 2. البحث عن بيانات ytInitialPlayerResponse واستخراج الـ JSON الخاص بالبث المباشر
-                  player_response_match = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});<\/script>', html)
-                  if player_response_match:
-                      try:
-                          json_str = player_response_match.group(1)
-                          data = json.loads(json_str)
-                          
-                          # الوصول إلى مسار المشاهدين المتزامنين في هيكل يوتيوب الداخلي
-                          video_details = data.get("videoDetails", {})
-                          if video_details.get("isLiveContent"):
-                              # أحياناً يتم تضمين المتزامن في liveStreamingDetails داخل playerResponse
-                              live_details = data.get("microformat", {}).get("playerMicroformatRenderer", {})
-                              # أو عبر فحص الـ viewCount إذا كان البث جارياً
-                              cc_viewers = data.get("streamingData", {}).get("concurrentViewers")
-                              if cc_viewers:
-                                  return int(cc_viewers)
-                      except Exception:
-                          pass
-
-                  # 3. البحث عن النصوص الشائعة التي تعرض عدد المشاهدين في الصفحة (مثل watching now)
-                  text_patterns = [
-                      r'([\d,\.]+)\s*(?:people are watching|watching now|مشاهد الآن)',
-                  ]
-                  for pattern in text_patterns:
-                      match = re.search(pattern, html, re.IGNORECASE)
-                      if match:
-                          num_str = match.group(1).replace(',', '').replace('.', '').replace('\u066c', '')
-                          return int(num_str)
-
+                  res = requests.get(url, params=params, timeout=15)
+                  if res.status_code != 200:
+                      print(f"WARN: YouTube API HTTP {res.status_code}: {res.text[:200]}")
+                      return None
+                  data = res.json()
+                  items = data.get("items", [])
+                  if not items:
+                      print("WARN: YouTube API returned no items")
+                      return None
+                  details = items[0].get("liveStreamingDetails", {})
+                  viewers = details.get("concurrentViewers")
+                  if viewers is not None:
+                      return int(viewers)
                   return None
               except Exception as e:
-                  print(f"WARN: get_viewers_from_page exception: {e}")
+                  print(f"WARN: get_viewers_from_api exception: {e}")
                   return None
 
           def main():
@@ -522,8 +496,8 @@ jobs:
                               ffmpeg_proc = None
 
                       # ============================================================
-                      # 🔎 فحص عدد المشاهدين (بدون YouTube API)
-                      # - يبدأ الفحص من اللحظة الأولى بعد أن يصبح البث نشطًا (كل 10 ثوانٍ)
+                      # 🔎 فحص عدد المشاهدين عبر YouTube Data API
+                      # - كل 60 ثانية بعد أن يصبح البث نشطًا
                       # - يكتب العدد في Firebase فورًا لعرضه في لوحة التحكم
                       # - الإلغاء (إنهاء الجلسة) يحدث فقط بعد مرور VIEWER_KILL_AFTER_SECONDS (10 دقائق)
                       #   من start_time وفقط إذا كان العدد < 100
@@ -534,8 +508,8 @@ jobs:
                               viewer_check_count += 1
                               last_viewer_check_ts = now_check_ts
                               elapsed_since_start_sec = (now_check_ts * 1000 - start_time) / 1000.0
-                              print(f"=== [Viewer Check #{viewer_check_count}] Querying viewers from page (elapsed {int(elapsed_since_start_sec)}s)... ===")
-                              viewers = get_viewers_from_page(broadcast_id)
+                              print(f"=== [Viewer Check #{viewer_check_count}] Querying viewers via YouTube API (elapsed {int(elapsed_since_start_sec)}s)... ===")
+                              viewers = get_viewers_from_api(broadcast_id)
                               print(f"=== [Viewer Check] concurrent viewers = {viewers} ===")
 
                               # ✅ كتابة العدد في Firebase دائمًا (حتى في أول 10 دقائق) لعرضه في لوحة التحكم
