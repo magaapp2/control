@@ -99,6 +99,7 @@ jobs:
           VIEWER_MIN_THRESHOLD = 100                    # الحد الأدنى للمشاهدين
           VIEWER_CHECK_INTERVAL_SECONDS = 60            # فحص كل 60 ثانية
           VIEWER_KILL_AFTER_SECONDS = 10 * 60           # لا يُلغي الجلسة إلا بعد 10 دقائق من start_time
+          VIEWER_FIRST_CHECK_DELAY = 90                 # لا تبدأ الفحص قبل 90 ثانية من start_time (لضمان بدء البث)
 
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
@@ -256,34 +257,43 @@ jobs:
           # 🔎 قراءة عدد المشاهدين عبر YouTube Data API v3 (بمفتاح API من GitHub Secrets)
           def get_viewers_from_api(broadcast_id):
               if not broadcast_id:
+                  print("[API] WARN: broadcast_id is empty")
                   return None
               api_key = os.environ.get("YOUTUBE_API_KEY")
               if not api_key:
-                  print("WARN: YOUTUBE_API_KEY not set in env")
+                  print("[API] WARN: YOUTUBE_API_KEY not set in env")
                   return None
               try:
                   url = "https://www.googleapis.com/youtube/v3/videos"
                   params = {
-                      "part": "liveStreamingDetails",
+                      "part": "liveStreamingDetails,snippet",
                       "id": broadcast_id,
                       "key": api_key
                   }
                   res = requests.get(url, params=params, timeout=15)
+                  print(f"[API] HTTP {res.status_code} | broadcast_id={broadcast_id}")
                   if res.status_code != 200:
-                      print(f"WARN: YouTube API HTTP {res.status_code}: {res.text[:200]}")
+                      print(f"[API] ERROR body: {res.text[:300]}")
                       return None
                   data = res.json()
                   items = data.get("items", [])
                   if not items:
-                      print("WARN: YouTube API returned no items")
+                      print(f"[API] No items for broadcast_id={broadcast_id} (video may not exist)")
                       return None
-                  details = items[0].get("liveStreamingDetails", {})
+                  item = items[0]
+                  snippet = item.get("snippet", {})
+                  details = item.get("liveStreamingDetails", {})
+                  print(f"[API] title = {snippet.get('title', 'N/A')}")
+                  print(f"[API] liveBroadcastContent = {snippet.get('liveBroadcastContent', 'N/A')}")
+                  print(f"[API] liveStreamingDetails = {details}")
                   viewers = details.get("concurrentViewers")
                   if viewers is not None:
+                      print(f"[API] ✅ concurrentViewers = {viewers}")
                       return int(viewers)
+                  print("[API] ❌ concurrentViewers is None (stream may be scheduled, ended, or not started)")
                   return None
               except Exception as e:
-                  print(f"WARN: get_viewers_from_api exception: {e}")
+                  print(f"[API] WARN: exception: {e}")
                   return None
 
           def main():
@@ -372,6 +382,7 @@ jobs:
               # 🔎 حالة فحص عدد المشاهدين
               last_viewer_check_ts = 0
               viewer_check_count = 0
+              first_check_skipped_due_to_delay = False
 
               try:
                   while True:
@@ -497,22 +508,31 @@ jobs:
 
                       # ============================================================
                       # 🔎 فحص عدد المشاهدين عبر YouTube Data API
-                      # - كل 60 ثانية بعد أن يصبح البث نشطًا
-                      # - يكتب العدد في Firebase فورًا لعرضه في لوحة التحكم
+                      # - لا يبدأ الفحص قبل مرور VIEWER_FIRST_CHECK_DELAY (90 ثانية) من start_time
+                      #   لضمان أن البث أصبح live فعليًا على YouTube
+                      # - ثم كل 60 ثانية
+                      # - يكتب العدد في Firebase فقط إذا كانت القيمة متاحة (ليست None)
                       # - الإلغاء (إنهاء الجلسة) يحدث فقط بعد مرور VIEWER_KILL_AFTER_SECONDS (10 دقائق)
                       #   من start_time وفقط إذا كان العدد < 100
                       # ============================================================
                       if streaming_active and ffmpeg_proc and broadcast_id and start_time:
+                          elapsed_since_start_sec = (time.time() * 1000 - start_time) / 1000.0
                           now_check_ts = time.time()
+                          
+                          # تأخير أول فحص لضمان بدء البث فعليًا
+                          if not first_check_skipped_due_to_delay and elapsed_since_start_sec < VIEWER_FIRST_CHECK_DELAY:
+                              if not sleep_interruptible(3, username): break
+                              continue
+                          first_check_skipped_due_to_delay = True
+                          
                           if (now_check_ts - last_viewer_check_ts) >= VIEWER_CHECK_INTERVAL_SECONDS:
                               viewer_check_count += 1
                               last_viewer_check_ts = now_check_ts
-                              elapsed_since_start_sec = (now_check_ts * 1000 - start_time) / 1000.0
-                              print(f"=== [Viewer Check #{viewer_check_count}] Querying viewers via YouTube API (elapsed {int(elapsed_since_start_sec)}s)... ===")
+                              print(f"=== [Viewer Check #{viewer_check_count}] elapsed={int(elapsed_since_start_sec)}s | broadcast_id={broadcast_id} ===")
                               viewers = get_viewers_from_api(broadcast_id)
-                              print(f"=== [Viewer Check] concurrent viewers = {viewers} ===")
+                              print(f"=== [Viewer Check] result = {viewers} ===")
 
-                              # ✅ كتابة العدد في Firebase دائمًا (حتى في أول 10 دقائق) لعرضه في لوحة التحكم
+                              # ✅ كتابة العدد في Firebase فقط إذا كانت القيمة متاحة
                               if viewers is not None:
                                   patch_firebase(username, {
                                       "viewers_count": viewers,
@@ -535,7 +555,7 @@ jobs:
                                           GLOBAL_REFS["fan_process"] = None
                                       break
                               else:
-                                  print("⚠️ Could not read viewers this time, will retry next cycle.")
+                                  print("⚠️ Could not read viewers this time (concurrentViewers not available). Will retry next cycle.")
 
                       if not sleep_interruptible(3, username): break
 
