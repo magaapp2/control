@@ -76,7 +76,7 @@ jobs:
       - name: Create Python Script
         run: |
           cat << 'EOF' > main.py
-          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json
+          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
@@ -191,13 +191,21 @@ jobs:
               return True
 
           # 🛡️ دالة حماية السيرفر من الاختراق (SSRF)
+          # 🔒 SECURITY FIX: تحقق قوي من IP (يشمل IPv4/IPv6/private/loopback/reserved/link-local)
           def is_safe_url(url):
               try:
                   u = urllib.parse.urlparse(url)
                   if u.scheme not in ('http', 'https'):
                       return False
-                  blocked = ['localhost', '127.', '10.', '192.168.', '169.254.', '172.16.', '172.17.', '172.18.']
-                  if any(u.hostname.startswith(b) for b in blocked):
+                  if not u.hostname:
+                      return False
+                  # حل الاسم إلى IP
+                  ip = socket.gethostbyname(u.hostname)
+                  ip_obj = ipaddress.ip_address(ip)
+                  # رفض أي IP داخلي/محجوز/loopback/رابط محلي/multicast
+                  if (ip_obj.is_private or ip_obj.is_loopback or 
+                      ip_obj.is_link_local or ip_obj.is_reserved or 
+                      ip_obj.is_multicast or ip_obj.is_unspecified):
                       return False
                   return True
               except:
