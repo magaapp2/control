@@ -97,8 +97,8 @@ jobs:
 
           # 🔎 إعدادات فحص عدد المشاهدين (بدون YouTube API)
           VIEWER_MIN_THRESHOLD = 100                    # الحد الأدنى للمشاهدين
-          VIEWER_CHECK_INTERVAL_SECONDS = 60            # فحص كل 60 ثانية بعد أول فحص
-          VIEWER_FIRST_CHECK_AFTER_SECONDS = 10 * 60    # أول فحص بعد 10 دقائق من بدء البث
+          VIEWER_CHECK_INTERVAL_SECONDS = 10            # فحص كل 10 ثوانٍ (منذ البداية)
+          VIEWER_KILL_AFTER_SECONDS = 10 * 60           # لا يُلغي الجلسة إلا بعد 10 دقائق من start_time
 
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
@@ -398,7 +398,6 @@ jobs:
               # 🔎 حالة فحص عدد المشاهدين
               last_viewer_check_ts = 0
               viewer_check_count = 0
-              first_viewer_check_done = False
 
               try:
                   while True:
@@ -524,37 +523,31 @@ jobs:
 
                       # ============================================================
                       # 🔎 فحص عدد المشاهدين (بدون YouTube API)
-                      # - أول فحص بعد 10 دقائق من start_time (بدء البث)
-                      # - ثم كل 60 ثانية
-                      # - إذا كان العدد < 100 → إنهاء الجلسة فورًا
-                      # - يكتب العدد في Firebase لعرضه في لوحة التحكم
+                      # - يبدأ الفحص من اللحظة الأولى بعد أن يصبح البث نشطًا (كل 10 ثوانٍ)
+                      # - يكتب العدد في Firebase فورًا لعرضه في لوحة التحكم
+                      # - الإلغاء (إنهاء الجلسة) يحدث فقط بعد مرور VIEWER_KILL_AFTER_SECONDS (10 دقائق)
+                      #   من start_time وفقط إذا كان العدد < 100
                       # ============================================================
                       if streaming_active and ffmpeg_proc and broadcast_id and start_time:
-                          elapsed_since_start_sec = (time.time() * 1000 - start_time) / 1000.0
-                          should_check = False
-
-                          if not first_viewer_check_done and elapsed_since_start_sec >= VIEWER_FIRST_CHECK_AFTER_SECONDS:
-                              should_check = True
-                          elif first_viewer_check_done and (time.time() - last_viewer_check_ts) >= VIEWER_CHECK_INTERVAL_SECONDS:
-                              should_check = True
-
-                          if should_check:
+                          now_check_ts = time.time()
+                          if (now_check_ts - last_viewer_check_ts) >= VIEWER_CHECK_INTERVAL_SECONDS:
                               viewer_check_count += 1
-                              last_viewer_check_ts = time.time()
-                              first_viewer_check_done = True
+                              last_viewer_check_ts = now_check_ts
+                              elapsed_since_start_sec = (now_check_ts * 1000 - start_time) / 1000.0
                               print(f"=== [Viewer Check #{viewer_check_count}] Querying viewers from page (elapsed {int(elapsed_since_start_sec)}s)... ===")
                               viewers = get_viewers_from_page(broadcast_id)
                               print(f"=== [Viewer Check] concurrent viewers = {viewers} ===")
 
-                              # ✅ كتابة العدد في Firebase لعرضه في لوحة التحكم
+                              # ✅ كتابة العدد في Firebase دائمًا (حتى في أول 10 دقائق) لعرضه في لوحة التحكم
                               if viewers is not None:
                                   patch_firebase(username, {
                                       "viewers_count": viewers,
                                       "viewers_updated_at": int(time.time() * 1000)
                                   })
 
-                                  if viewers < VIEWER_MIN_THRESHOLD:
-                                      print(f"❌ Viewers ({viewers}) < {VIEWER_MIN_THRESHOLD}. Ending session.")
+                                  # ⛔ الإلغاء فقط بعد مرور 10 دقائق من start_time
+                                  if elapsed_since_start_sec >= VIEWER_KILL_AFTER_SECONDS and viewers < VIEWER_MIN_THRESHOLD:
+                                      print(f"❌ Viewers ({viewers}) < {VIEWER_MIN_THRESHOLD} after {int(elapsed_since_start_sec)}s. Ending session.")
                                       patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0})
                                       if ffmpeg_proc:
                                           try: ffmpeg_proc.kill()
