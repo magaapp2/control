@@ -80,7 +80,7 @@ jobs:
       - name: Create Python Script
         run: |
           cat << 'EOF' > main.py
-          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket
+          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket, re
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
@@ -94,6 +94,10 @@ jobs:
           SESSION_MIN_MINUTES = 70
           SESSION_MAX_MINUTES = 130
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
+
+          # 🔎 إعدادات فحص عدد المشاهدين (بدون YouTube API)
+          VIEWER_MIN_THRESHOLD = 100          # الحد الأدنى للمشاهدين
+          VIEWER_CHECK_INTERVAL_SECONDS = 60  # فحص كل 60 ثانية
 
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
@@ -185,7 +189,7 @@ jobs:
               cleanup_processes()
               u = GLOBAL_REFS.get("username")
               if u:
-                  patch_firebase(u, {"session_active": False, "streaming": False})
+                  patch_firebase(u, {"session_active": False, "streaming": False, "viewers_count": 0})
               os._exit(0)
 
           signal.signal(signal.SIGTERM, kill_all)
@@ -247,6 +251,45 @@ jobs:
               with open(os.path.join(default_dir, "Preferences"), "w", encoding="utf-8") as f:
                   json.dump(prefs, f)
               return profile_dir
+
+          # 🔎 قراءة عدد المشاهدين من HTML صفحة البث مباشرة (بدون YouTube API)
+          def get_viewers_from_page(broadcast_id):
+              if not broadcast_id:
+                  return None
+              try:
+                  url = f"https://www.youtube.com/watch?v={broadcast_id}"
+                  headers = {
+                      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/120.0.0.0 Safari/537.36",
+                      "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+                  }
+                  res = requests.get(url, headers=headers, timeout=15)
+                  if res.status_code != 200:
+                      print(f"WARN: YouTube page HTTP {res.status_code}")
+                      return None
+                  html = res.text
+
+                  # الطريقة 1: ytInitialData يحتوي على concurrentViewers
+                  m = re.search(r'"concurrentViewers"\s*:\s*"?(\d+)"?', html)
+                  if m:
+                      return int(m.group(1))
+
+                  # الطريقة 2: ytInitialPlayerResponse
+                  m = re.search(r'"viewCount"\s*:\s*"(\d+)"', html)
+                  if m:
+                      return int(m.group(1))
+
+                  # الطريقة 3: نص "watching" أو "مشاهد"
+                  m = re.search(r'([\d,\.]+)\s*(?:watching|مشاهد|viewer)', html, re.IGNORECASE)
+                  if m:
+                      num = int(m.group(1).replace(',', '').replace('.', '').replace('\u066c', ''))
+                      return num
+
+                  return None
+              except Exception as e:
+                  print(f"WARN: get_viewers_from_page exception: {e}")
+                  return None
 
           def main():
               username = os.environ.get("INPUT_USERNAME")
@@ -331,6 +374,10 @@ jobs:
               last_url = ""
               auto_start_done = False
 
+              # 🔎 حالة فحص عدد المشاهدين
+              last_viewer_check_ts = 0
+              viewer_check_count = 0
+
               try:
                   while True:
                       data = get_firebase_data(username)
@@ -344,6 +391,7 @@ jobs:
                       session_active = data.get("session_active", False)
                       start_time = data.get("start_time", 0)
                       end_time = data.get("end_time", 0)
+                      broadcast_id = data.get("broadcast_id", "")
 
                       # ✅ الإصلاح الجذري لتوقيت الجلسة:
                       # end_time هو timestamp مطلق بالفعل (كتبه Apps Script كـ now + duration).
@@ -362,13 +410,13 @@ jobs:
                       # ✅ إنهاء عند الوصول لـ end_time المطلق
                       if session_active and calculated_end_time and now_ms >= calculated_end_time:
                           print("⏰ Session time ended (absolute end_time). Stopping stream.")
-                          patch_firebase(username, {"session_active": False, "streaming": False})
+                          patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0})
                           break
 
                       # ✅ إنهاء احتياطي عند تجاوز الحد الأقصى المسموح
                       if now_ms >= hard_deadline_ts:
                           print("⏰ Session hard limit reached. Stopping stream.")
-                          patch_firebase(username, {"session_active": False, "streaming": False})
+                          patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0})
                           break
 
                       if (session_active and not streaming_active and not auto_start_done and start_time and stream_key):
@@ -452,6 +500,45 @@ jobs:
                               ffmpeg_proc.terminate()
                               ffmpeg_proc = None
 
+                      # ============================================================
+                      # 🔎 فحص عدد المشاهدين كل 60 ثانية (بدون YouTube API)
+                      # - يبدأ الفحص فقط بعد أن يصبح البث نشطًا (ffmpeg يعمل)
+                      # - إذا كان العدد < 100 → إنهاء الجلسة فورًا
+                      # - يكتب العدد في Firebase لعرضه في لوحة التحكم
+                      # ============================================================
+                      if streaming_active and ffmpeg_proc and broadcast_id:
+                          now_check_ts = time.time()
+                          if (now_check_ts - last_viewer_check_ts) >= VIEWER_CHECK_INTERVAL_SECONDS:
+                              viewer_check_count += 1
+                              last_viewer_check_ts = now_check_ts
+                              print(f"=== [Viewer Check #{viewer_check_count}] Querying viewers from page... ===")
+                              viewers = get_viewers_from_page(broadcast_id)
+                              print(f"=== [Viewer Check] concurrent viewers = {viewers} ===")
+
+                              # ✅ كتابة العدد في Firebase لعرضه في لوحة التحكم
+                              if viewers is not None:
+                                  patch_firebase(username, {
+                                      "viewers_count": viewers,
+                                      "viewers_updated_at": int(time.time() * 1000)
+                                  })
+
+                                  if viewers < VIEWER_MIN_THRESHOLD:
+                                      print(f"❌ Viewers ({viewers}) < {VIEWER_MIN_THRESHOLD}. Ending session.")
+                                      patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0})
+                                      if ffmpeg_proc:
+                                          try: ffmpeg_proc.kill()
+                                          except: pass
+                                          ffmpeg_proc = None
+                                          GLOBAL_REFS["ffmpeg_proc"] = None
+                                      if fan_process:
+                                          try: fan_process.terminate()
+                                          except: pass
+                                          fan_process = None
+                                          GLOBAL_REFS["fan_process"] = None
+                                      break
+                              else:
+                                  print("⚠️ Could not read viewers this time, will retry next cycle.")
+
                       if not sleep_interruptible(3, username): break
 
               except Exception as e:
@@ -466,7 +553,7 @@ jobs:
                   try: driver.quit()
                   except: pass
                   disp.stop()
-                  patch_firebase(username, {"session_active": False, "streaming": False})
+                  patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0})
                   print("=== Session ended ===")
 
           if __name__ == "__main__":
@@ -496,7 +583,7 @@ jobs:
               creds = service_account.Credentials.from_service_account_info(sa_info, scopes=['https://www.googleapis.com/auth/firebase.database'])
               creds.refresh(google.auth.transport.requests.Request())
               url = 'https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app/control/users/' + urllib.parse.quote(username) + '.json?access_token=' + urllib.parse.quote(creds.token)
-              r = requests.patch(url, json={'session_active': False, 'streaming': False}, headers={'Content-Type': 'application/json'}, timeout=10)
+              r = requests.patch(url, json={'session_active': False, 'streaming': False, 'viewers_count': 0}, headers={'Content-Type': 'application/json'}, timeout=10)
               print('Cleanup HTTP status:', r.status_code)
           except Exception as e:
               print('Cleanup failed:', e)
