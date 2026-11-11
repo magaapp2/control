@@ -190,6 +190,19 @@ jobs:
                       return False
               return True
 
+          # 🛡️ دالة حماية السيرفر من الاختراق (SSRF)
+          def is_safe_url(url):
+              try:
+                  u = urllib.parse.urlparse(url)
+                  if u.scheme not in ('http', 'https'):
+                      return False
+                  blocked = ['localhost', '127.', '10.', '192.168.', '169.254.', '172.16.', '172.17.', '172.18.']
+                  if any(u.hostname.startswith(b) for b in blocked):
+                      return False
+                  return True
+              except:
+                  return False
+
           def build_chrome_prefs_dir():
               profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
               default_dir = os.path.join(profile_dir, "Default")
@@ -337,6 +350,11 @@ jobs:
 
                       if game_url and game_url != last_url:
                           try:
+                              # 🛡️ التحقق من أمان الرابط قبل فتحه
+                              if not is_safe_url(game_url):
+                                  print(f"❌ ERROR: Unsafe URL blocked: {game_url}")
+                                  continue
+                              
                               driver.get(game_url)
                               last_url = game_url
                               print(f"OK: Loaded game_url: {game_url}")
