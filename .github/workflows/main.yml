@@ -102,7 +102,7 @@ jobs:
           VIEWER_MIN_THRESHOLD = 10
           VIEWER_CHECK_INTERVAL_SECONDS = 60
           # ⚠️ للاختبار: 1 دقيقة فقط. للإرجاع إلى 10 دقائق، غيّر 1 إلى 10
-          VIEWER_KILL_AFTER_SECONDS = 10 * 60
+          VIEWER_KILL_AFTER_SECONDS = 1 * 60
           VIEWER_FIRST_CHECK_DELAY = 90
 
           GLOBAL_REFS = {
