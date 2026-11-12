@@ -99,9 +99,10 @@ jobs:
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
 
           # 🔎 إعدادات فحص المشاهدين (عبر Apps Script الذي يستدعي YouTube API)
-          VIEWER_MIN_THRESHOLD = 100
+          VIEWER_MIN_THRESHOLD = 1
           VIEWER_CHECK_INTERVAL_SECONDS = 60
-          VIEWER_KILL_AFTER_SECONDS = 10 * 60
+          # ⚠️ للاختبار: 1 دقيقة فقط. للإرجاع إلى 10 دقائق، غيّر 1 إلى 10
+          VIEWER_KILL_AFTER_SECONDS = 1 * 60
           VIEWER_FIRST_CHECK_DELAY = 90
 
           GLOBAL_REFS = {
@@ -503,7 +504,8 @@ jobs:
                       # - لا يبدأ الفحص قبل مرور VIEWER_FIRST_CHECK_DELAY (90 ثانية) من start_time
                       # - ثم كل VIEWER_CHECK_INTERVAL_SECONDS (60 ثانية)
                       # - يكتب viewers_count و likes_count في Firebase إذا كانت القيم متاحة
-                      # - الإلغاء فقط بعد مرور VIEWER_KILL_AFTER_SECONDS (10 دقائق) وفقط إذا كان العدد < 100
+                      # - الإلغاء فقط بعد مرور VIEWER_KILL_AFTER_SECONDS (حالياً 1 دقيقة للاختبار)
+                      #   وفقط إذا كان العدد < 100 (بما في ذلك None = 0)
                       # ============================================================
                       if streaming_active and ffmpeg_proc and broadcast_id and start_time:
                           elapsed_since_start_sec = (time.time() * 1000 - start_time) / 1000.0
@@ -534,9 +536,12 @@ jobs:
                                       patch_payload["likes_count"] = int(likes)
                                   patch_firebase(username, patch_payload)
 
-                                  # ⛔ الإلغاء فقط بعد مرور 10 دقائق من start_time وفقط إذا كان العدد < 100
-                                  if viewers is not None and elapsed_since_start_sec >= VIEWER_KILL_AFTER_SECONDS and int(viewers) < VIEWER_MIN_THRESHOLD:
-                                      print(f"❌ Viewers ({viewers}) < {VIEWER_MIN_THRESHOLD} after {int(elapsed_since_start_sec)}s. Ending session.")
+                                  # ✅ اعتبر None كـ 0 في منطق الإنهاء (لأن None يعني "لا يوجد مشاهدون" أو "غير متاح")
+                                  effective_viewers = viewers if viewers is not None else 0
+
+                                  # ⛔ الإلغاء فقط بعد مرور VIEWER_KILL_AFTER_SECONDS من start_time
+                                  if elapsed_since_start_sec >= VIEWER_KILL_AFTER_SECONDS and effective_viewers < VIEWER_MIN_THRESHOLD:
+                                      print(f"❌ Viewers ({effective_viewers}) < {VIEWER_MIN_THRESHOLD} after {int(elapsed_since_start_sec)}s. Ending session.")
                                       patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0, "likes_count": 0})
                                       if ffmpeg_proc:
                                           try: ffmpeg_proc.kill()
