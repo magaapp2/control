@@ -80,7 +80,7 @@ jobs:
       - name: Create Python Script
         run: |
           cat << 'EOF' > main.py
-          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket
+          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket, random
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
@@ -90,7 +90,7 @@ jobs:
           FIREBASE_BASE = "https://control-gitlive-default-rtdb.europe-west1.firebasedatabase.app"
           AUTO_START_DELAY_SECONDS = 5 
 
-          # ⏱️ حدود الجلسة (بالدقائق) — يجب أن تتوافق مع Apps Script
+          # ⏱️ حدود الجلسة (بالدقائق) — GitHub هو المتحكم
           SESSION_MIN_MINUTES = 70
           SESSION_MAX_MINUTES = 130
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
@@ -306,8 +306,20 @@ jobs:
               
               patch_firebase(username, {"session_active": True})
 
-              # ⏱️ بداية الجلسة داخل السيرفر (لحساب الحد الأقصى الاحتياطي)
+              # ⏱️ بداية الجلسة داخل السيرفر
               session_loop_start_ts = time.time()
+
+              # ✅ GitHub هو المتحكم في مدة الجلسة — يختارها عشوائياً بين 70 و130 دقيقة
+              session_duration_minutes = random.randint(SESSION_MIN_MINUTES, SESSION_MAX_MINUTES)
+              session_end_ts = session_loop_start_ts + session_duration_minutes * 60
+              print(f"⏱️ Session duration chosen: {session_duration_minutes} minutes | end at: {int(session_end_ts)}")
+
+              # ✅ كتابة وقت الجلسة الحقيقي في Firebase (للعرض فقط — GitHub لا يقرأه للإنهاء)
+              patch_firebase(username, {
+                  "start_time": int(session_loop_start_ts * 1000),
+                  "session_duration_minutes": session_duration_minutes,
+                  "session_end_time": int(session_end_ts * 1000)
+              })
 
               sink_name = "Sink1"
               os.environ['PULSE_SINK'] = sink_name
@@ -395,32 +407,26 @@ jobs:
                       game_url = data.get("game_url", "")
                       stream_key = data.get("stream_key", "")
                       session_active = data.get("session_active", False)
-                      start_time = data.get("start_time", 0)
-                      end_time = data.get("end_time", 0)
                       broadcast_id = data.get("broadcast_id", "")
+                      start_time = data.get("start_time", 0)
 
-                      # ✅ الإصلاح الجذري لتوقيت الجلسة:
-                      # end_time هو timestamp مطلق بالفعل (كتبه Apps Script كـ now + duration).
-                      # لا نحسب الفرق ونعيد إضافته للوقت الحالي (كان يسبب تجديد لا نهائي).
-                      calculated_end_time = end_time if end_time else 0
+                      # ⏱️ حد أقصى احتياطي داخل السيرفر (لو فشل الفحص الأساسي)
+                      hard_deadline_ts = session_loop_start_ts + SESSION_HARD_LIMIT_SECONDS
 
-                      # ⏱️ حد أقصى احتياطي داخل السيرفر (لو end_time ضاع أو كان خاطئاً)
-                      hard_deadline_ts = (session_loop_start_ts + SESSION_HARD_LIMIT_SECONDS) * 1000
-
-                      print(f"STATE: session_active={session_active} streaming={streaming_active} stream_key={'YES' if stream_key else 'NO'} game_url={'YES' if game_url else 'NO'} end_in_sec={int((calculated_end_time - time.time()*1000)/1000) if calculated_end_time else 'N/A'}")
+                      print(f"STATE: session_active={session_active} streaming={streaming_active} stream_key={'YES' if stream_key else 'NO'} game_url={'YES' if game_url else 'NO'} session_end_in_sec={int(session_end_ts - time.time())}")
 
                       if not session_active: break
 
-                      now_ms = time.time() * 1000
+                      now_ts = time.time()
 
-                      # ✅ إنهاء عند الوصول لـ end_time المطلق
-                      if session_active and calculated_end_time and now_ms >= calculated_end_time:
-                          print("⏰ Session time ended (absolute end_time). Stopping stream.")
+                      # ✅ الإنهاء الأساسي: عند الوصول لـ session_end_ts (الذي حدده GitHub)
+                      if now_ts >= session_end_ts:
+                          print(f"⏰ Session duration ({session_duration_minutes} min) reached. Stopping stream.")
                           patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0})
                           break
 
-                      # ✅ إنهاء احتياطي عند تجاوز الحد الأقصى المسموح
-                      if now_ms >= hard_deadline_ts:
+                      # ✅ الإنهاء الاحتياطي: عند تجاوز الحد الأقصى المسموح
+                      if now_ts >= hard_deadline_ts:
                           print("⏰ Session hard limit reached. Stopping stream.")
                           patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0})
                           break
