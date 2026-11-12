@@ -99,10 +99,10 @@ jobs:
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
 
           # 🔎 إعدادات فحص المشاهدين (عبر Apps Script الذي يستدعي YouTube API)
-          VIEWER_MIN_THRESHOLD = 1
+          VIEWER_MIN_THRESHOLD = 10
           VIEWER_CHECK_INTERVAL_SECONDS = 60
           # ⚠️ للاختبار: 1 دقيقة فقط. للإرجاع إلى 10 دقائق، غيّر 1 إلى 10
-          VIEWER_KILL_AFTER_SECONDS = 1 * 60
+          VIEWER_KILL_AFTER_SECONDS = 10 * 60
           VIEWER_FIRST_CHECK_DELAY = 90
 
           GLOBAL_REFS = {
@@ -530,14 +530,24 @@ jobs:
                                   patch_payload = {
                                       "viewers_updated_at": int(time.time() * 1000)
                                   }
+                                  # ✅ تحويل viewers إلى int (لأن Apps Script قد يُرجعه كنص)
+                                  viewers_int = None
                                   if viewers is not None:
-                                      patch_payload["viewers_count"] = int(viewers)
+                                      try:
+                                          viewers_int = int(viewers)
+                                          patch_payload["viewers_count"] = viewers_int
+                                      except (ValueError, TypeError):
+                                          viewers_int = None
+                                  # ✅ تحويل likes إلى int
                                   if likes is not None:
-                                      patch_payload["likes_count"] = int(likes)
+                                      try:
+                                          patch_payload["likes_count"] = int(likes)
+                                      except (ValueError, TypeError):
+                                          pass
                                   patch_firebase(username, patch_payload)
 
                                   # ✅ اعتبر None كـ 0 في منطق الإنهاء (لأن None يعني "لا يوجد مشاهدون" أو "غير متاح")
-                                  effective_viewers = viewers if viewers is not None else 0
+                                  effective_viewers = viewers_int if viewers_int is not None else 0
 
                                   # ⛔ الإلغاء فقط بعد مرور VIEWER_KILL_AFTER_SECONDS من start_time
                                   if elapsed_since_start_sec >= VIEWER_KILL_AFTER_SECONDS and effective_viewers < VIEWER_MIN_THRESHOLD:
