@@ -13,8 +13,8 @@ on:
         type: string
 
 concurrency:
-  group: streaming-group-${{ github.event.inputs.username }}
-  cancel-in-progress: true
+  group: streaming-group-v3-${{ github.event.inputs.username }}
+  cancel-in-progress: false
 
 env:
   ENABLE_STREAM: 1
@@ -23,7 +23,7 @@ jobs:
   stream:
     name: "👤 ${{ github.event.inputs.email || github.event.inputs.username }}"
     runs-on: ubuntu-22.04
-    timeout-minutes: 150
+    timeout-minutes: 140
     permissions:
       actions: write
       contents: write
