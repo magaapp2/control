@@ -98,13 +98,6 @@ jobs:
           SESSION_MAX_MINUTES = 130
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
 
-          # 🔎 إعدادات فحص المشاهدين (عبر Apps Script الذي يستدعي YouTube API)
-          VIEWER_MIN_THRESHOLD = 10
-          VIEWER_CHECK_INTERVAL_SECONDS = 60
-          # ⚠️ للاختبار: 1 دقيقة فقط. للإرجاع إلى 10 دقائق، غيّر 1 إلى 10
-          VIEWER_KILL_AFTER_SECONDS = 1 * 60
-          VIEWER_FIRST_CHECK_DELAY = 90
-
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
               "fan_process": None,
@@ -258,31 +251,6 @@ jobs:
                   json.dump(prefs, f)
               return profile_dir
 
-          # 🔎 جلب إحصائيات البث (مشاهدين + إعجابات) عبر Apps Script
-          # Apps Script يملك YOUTUBE_API_KEY في Script Properties
-          def get_live_stats_via_apps_script(broadcast_id):
-              if not broadcast_id:
-                  print("[APP_SCRIPT] WARN: broadcast_id is empty")
-                  return None
-              try:
-                  url = APPS_SCRIPT_URL + "?action=get_live_stats&videoId=" + urllib.parse.quote(broadcast_id)
-                  res = requests.get(url, timeout=15)
-                  print(f"[APP_SCRIPT] HTTP {res.status_code} | broadcast_id={broadcast_id}")
-                  if res.status_code != 200:
-                      print(f"[APP_SCRIPT] ERROR body: {res.text[:300]}")
-                      return None
-                  data = res.json() or {}
-                  if data.get("status") != "success":
-                      print(f"[APP_SCRIPT] ERROR: {data.get('message', 'unknown')}")
-                      return None
-                  viewers = data.get("viewers")
-                  likes = data.get("likes")
-                  print(f"[APP_SCRIPT] viewers={viewers} likes={likes} live={data.get('liveBroadcastContent')}")
-                  return {"viewers": viewers, "likes": likes}
-              except Exception as e:
-                  print(f"[APP_SCRIPT] WARN: exception: {e}")
-                  return None
-
           def main():
               username = os.environ.get("INPUT_USERNAME")
               if not username:
@@ -378,11 +346,6 @@ jobs:
               last_url = ""
               auto_start_done = False
 
-              # 🔎 حالة فحص المشاهدين
-              last_viewer_check_ts = 0
-              viewer_check_count = 0
-              first_check_skipped_due_to_delay = False
-
               try:
                   while True:
                       data = get_firebase_data(username)
@@ -395,7 +358,6 @@ jobs:
                       stream_key = data.get("stream_key", "")
                       session_active = data.get("session_active", False)
                       start_time = data.get("start_time", 0)
-                      broadcast_id = data.get("broadcast_id", "")
 
                       # ⏱️ حد أقصى احتياطي داخل السيرفر (لو فشل الفحص الأساسي)
                       hard_deadline_ts = session_loop_start_ts + SESSION_HARD_LIMIT_SECONDS
@@ -498,74 +460,6 @@ jobs:
                           if ffmpeg_proc:
                               ffmpeg_proc.terminate()
                               ffmpeg_proc = None
-
-                      # ============================================================
-                      # 🔎 فحص المشاهدين والإعجابات عبر Apps Script (الذي يملك YOUTUBE_API_KEY)
-                      # - لا يبدأ الفحص قبل مرور VIEWER_FIRST_CHECK_DELAY (90 ثانية) من start_time
-                      # - ثم كل VIEWER_CHECK_INTERVAL_SECONDS (60 ثانية)
-                      # - يكتب viewers_count و likes_count في Firebase إذا كانت القيم متاحة
-                      # - الإلغاء فقط بعد مرور VIEWER_KILL_AFTER_SECONDS (حالياً 1 دقيقة للاختبار)
-                      #   وفقط إذا كان العدد < 100 (بما في ذلك None = 0)
-                      # ============================================================
-                      if streaming_active and ffmpeg_proc and broadcast_id and start_time:
-                          elapsed_since_start_sec = (time.time() * 1000 - start_time) / 1000.0
-                          now_check_ts = time.time()
-                          
-                          # تأخير أول فحص لضمان بدء البث فعليًا
-                          if not first_check_skipped_due_to_delay and elapsed_since_start_sec < VIEWER_FIRST_CHECK_DELAY:
-                              if not sleep_interruptible(3, username): break
-                              continue
-                          first_check_skipped_due_to_delay = True
-                          
-                          if (now_check_ts - last_viewer_check_ts) >= VIEWER_CHECK_INTERVAL_SECONDS:
-                              viewer_check_count += 1
-                              last_viewer_check_ts = now_check_ts
-                              print(f"=== [Viewer Check #{viewer_check_count}] elapsed={int(elapsed_since_start_sec)}s | broadcast_id={broadcast_id} ===")
-                              stats = get_live_stats_via_apps_script(broadcast_id)
-                              print(f"=== [Viewer Check] result = {stats} ===")
-
-                              if stats is not None:
-                                  viewers = stats.get("viewers")
-                                  likes = stats.get("likes")
-                                  patch_payload = {
-                                      "viewers_updated_at": int(time.time() * 1000)
-                                  }
-                                  # ✅ تحويل viewers إلى int (لأن Apps Script قد يُرجعه كنص)
-                                  viewers_int = None
-                                  if viewers is not None:
-                                      try:
-                                          viewers_int = int(viewers)
-                                          patch_payload["viewers_count"] = viewers_int
-                                      except (ValueError, TypeError):
-                                          viewers_int = None
-                                  # ✅ تحويل likes إلى int
-                                  if likes is not None:
-                                      try:
-                                          patch_payload["likes_count"] = int(likes)
-                                      except (ValueError, TypeError):
-                                          pass
-                                  patch_firebase(username, patch_payload)
-
-                                  # ✅ اعتبر None كـ 0 في منطق الإنهاء (لأن None يعني "لا يوجد مشاهدون" أو "غير متاح")
-                                  effective_viewers = viewers_int if viewers_int is not None else 0
-
-                                  # ⛔ الإلغاء فقط بعد مرور VIEWER_KILL_AFTER_SECONDS من start_time
-                                  if elapsed_since_start_sec >= VIEWER_KILL_AFTER_SECONDS and effective_viewers < VIEWER_MIN_THRESHOLD:
-                                      print(f"❌ Viewers ({effective_viewers}) < {VIEWER_MIN_THRESHOLD} after {int(elapsed_since_start_sec)}s. Ending session.")
-                                      patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0, "likes_count": 0})
-                                      if ffmpeg_proc:
-                                          try: ffmpeg_proc.kill()
-                                          except: pass
-                                          ffmpeg_proc = None
-                                          GLOBAL_REFS["ffmpeg_proc"] = None
-                                      if fan_process:
-                                          try: fan_process.terminate()
-                                          except: pass
-                                          fan_process = None
-                                          GLOBAL_REFS["fan_process"] = None
-                                      break
-                              else:
-                                  print("⚠️ Could not read viewers this time (Apps Script returned None). Will retry next cycle.")
 
                       if not sleep_interruptible(3, username): break
 
