@@ -80,7 +80,7 @@ jobs:
       - name: Create Python Script
         run: |
           cat << 'EOF' > main.py
-          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket, random
+          import os, subprocess, time, requests, signal, urllib.parse, tempfile, json, ipaddress, socket, random, threading
           from pyvirtualdisplay import Display
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
@@ -97,6 +97,14 @@ jobs:
           SESSION_MIN_MINUTES = 70
           SESSION_MAX_MINUTES = 130
           SESSION_HARD_LIMIT_SECONDS = (SESSION_MAX_MINUTES + 5) * 60  # هامش 5 دقائق للأمان
+
+          # ✅ إعدادات فحص المشاهدين (انتقلت من Apps Script إلى GitHub)
+          VIEWER_MIN_THRESHOLD = 100
+          VIEWER_KILL_AFTER_SECONDS = 10 * 60   # نبدأ الفحص بعد 10 دقائق من بداية الجلسة
+          VIEWER_CHECK_INTERVAL_SECONDS = 60    # نفحص كل دقيقة
+
+          # ✅ مفتاح YouTube Data API (من GitHub Secrets)
+          YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
@@ -223,6 +231,42 @@ jobs:
               except:
                   return False
 
+          # ✅ جلب عدد المشاهدين مباشرة من YouTube Data API
+          def fetch_live_viewers(broadcast_id):
+              if not broadcast_id or not YOUTUBE_API_KEY:
+                  return None
+              try:
+                  url = (
+                      "https://www.googleapis.com/youtube/v3/videos"
+                      "?part=liveStreamingDetails"
+                      "&id=" + urllib.parse.quote(broadcast_id) +
+                      "&key=" + urllib.parse.quote(YOUTUBE_API_KEY)
+                  )
+                  res = requests.get(url, timeout=10)
+                  if res.status_code != 200:
+                      print(f"WARN: fetch_live_viewers HTTP {res.status_code}: {res.text[:200]}")
+                      return None
+                  data = res.json()
+                  items = data.get("items", [])
+                  if not items:
+                      return None
+                  details = items[0].get("liveStreamingDetails", {}) or {}
+                  v = details.get("concurrentViewers")
+                  if v is None:
+                      return 0
+                  return int(v)
+              except Exception as e:
+                  print(f"WARN: fetch_live_viewers failed: {e}")
+                  return None
+
+          # ✅ قارئ لوج ffmpeg في thread منفصل (يمنع تجميد الـ main loop)
+          def _ffmpeg_log_reader(proc):
+              try:
+                  for line in proc.stdout:
+                      print(f"[ffmpeg] {line.rstrip()}", flush=True)
+              except Exception:
+                  pass
+
           def build_chrome_prefs_dir():
               profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
               default_dir = os.path.join(profile_dir, "Default")
@@ -346,6 +390,10 @@ jobs:
               last_url = ""
               auto_start_done = False
 
+              # ✅ متغيرات فحص المشاهدين
+              low_viewer_streak_start = None
+              last_viewer_check_ts = 0
+
               try:
                   while True:
                       data = get_firebase_data(username)
@@ -358,6 +406,7 @@ jobs:
                       stream_key = data.get("stream_key", "")
                       session_active = data.get("session_active", False)
                       start_time = data.get("start_time", 0)
+                      broadcast_id = data.get("broadcast_id", "")
 
                       # ⏱️ حد أقصى احتياطي داخل السيرفر (لو فشل الفحص الأساسي)
                       hard_deadline_ts = session_loop_start_ts + SESSION_HARD_LIMIT_SECONDS
@@ -379,6 +428,48 @@ jobs:
                           print("⏰ Session hard limit reached. Stopping stream.")
                           patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0, "likes_count": 0})
                           break
+
+                      # ===== ✅ فحص المشاهدين (انتقل من Apps Script إلى GitHub) =====
+                      now_sec = int(time.time())
+                      elapsed_since_start = now_sec - int(start_time / 1000) if start_time else 0
+
+                      if (session_active and broadcast_id and start_time
+                              and elapsed_since_start >= VIEWER_KILL_AFTER_SECONDS):
+
+                          if now_sec - last_viewer_check_ts >= VIEWER_CHECK_INTERVAL_SECONDS:
+                              last_viewer_check_ts = now_sec
+
+                              viewers = fetch_live_viewers(broadcast_id)
+                              print(f"[viewer-check] viewers={viewers} threshold={VIEWER_MIN_THRESHOLD} elapsed_min={elapsed_since_start//60}")
+
+                              # ✅ heartbeat للواجهة (watchdog)
+                              try:
+                                  patch_firebase(username, {"viewers_updated_at": int(time.time() * 1000)})
+                              except Exception:
+                                  pass
+
+                              if viewers is not None and viewers < VIEWER_MIN_THRESHOLD:
+                                  if low_viewer_streak_start is None:
+                                      low_viewer_streak_start = now_sec
+                                      print("[viewer-check] بدأ تتبع مشاهدين قليلين")
+                                  else:
+                                      streak = now_sec - low_viewer_streak_start
+                                      if streak >= VIEWER_CHECK_INTERVAL_SECONDS:
+                                          print(f"⛔ [viewer-check] مشاهدين < {VIEWER_MIN_THRESHOLD} لمدة {streak}s — إنهاء الجلسة")
+                                          try:
+                                              patch_firebase(username, {
+                                                  "session_active": False,
+                                                  "streaming": False,
+                                                  "viewers_count": 0,
+                                                  "likes_count": 0
+                                              })
+                                          except Exception as e:
+                                              print(f"WARN: patch_firebase failed: {e}")
+                                          break
+                              else:
+                                  if low_viewer_streak_start is not None:
+                                      print("[viewer-check] عاد المشاهدون للطبيعي — تصفير العداد")
+                                  low_viewer_streak_start = None
 
                       if (session_active and not streaming_active and not auto_start_done and start_time and stream_key):
                           elapsed = (time.time() * 1000) - start_time
@@ -410,7 +501,8 @@ jobs:
 
                           print("=== Starting FFmpeg stream ===")
                           ffmpeg_cmd = [
-                              'ffmpeg', '-y', '-nostats', '-loglevel', 'info',
+                              'ffmpeg', '-y', '-loglevel', 'info',
+                              '-stats', '-stats_period', '10',
                               '-thread_queue_size', '1024',
                               '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60', '-video_size', '720x1360', '-i', f":{disp.display}",
                               '-itsoffset', '0.0', 
@@ -440,26 +532,36 @@ jobs:
                           GLOBAL_REFS["ffmpeg_proc"] = ffmpeg_proc
                           print(f"OK: FFmpeg PID = {ffmpeg_proc.pid}")
 
-                      # ✅ طباعة سجل ffmpeg في الوقت الفعلي (للتشخيص)
-                      if ffmpeg_proc and ffmpeg_proc.poll() is None:
-                          try:
-                              line = ffmpeg_proc.stdout.readline()
-                              if line:
-                                  print(f"[ffmpeg] {line.rstrip()}")
-                          except Exception:
-                              pass
-                      elif ffmpeg_proc and ffmpeg_proc.poll() is not None:
+                          # ✅ اقرأ لوج ffmpeg في thread منفصل عشان الـ main loop مايتحبسش
+                          threading.Thread(
+                              target=_ffmpeg_log_reader,
+                              args=(ffmpeg_proc,),
+                              daemon=True
+                          ).start()
+
+                      # ✅ كشف موت ffmpeg (non-blocking — لا يستخدم readline)
+                      if ffmpeg_proc and ffmpeg_proc.poll() is not None:
                           print(f"ERROR: FFmpeg exited with code {ffmpeg_proc.returncode}")
+                          if fan_process:
+                              try: fan_process.terminate()
+                              except: pass
+                              fan_process = None
+                              GLOBAL_REFS["fan_process"] = None
                           ffmpeg_proc = None
                           GLOBAL_REFS["ffmpeg_proc"] = None
 
+                      # ✅ إيقاف ffmpeg عند طلب الإيقاف من الواجهة (streaming=false)
                       elif not streaming_active and ffmpeg_proc:
                           if fan_process:
-                              fan_process.terminate()
+                              try: fan_process.terminate()
+                              except: pass
                               fan_process = None
+                              GLOBAL_REFS["fan_process"] = None
                           if ffmpeg_proc:
-                              ffmpeg_proc.terminate()
+                              try: ffmpeg_proc.terminate()
+                              except: pass
                               ffmpeg_proc = None
+                              GLOBAL_REFS["ffmpeg_proc"] = None
 
                       if not sleep_interruptible(3, username): break
 
@@ -487,6 +589,7 @@ jobs:
           ENABLE_STREAM: ${{ env.ENABLE_STREAM }}
           INPUT_USERNAME: ${{ github.event.inputs.username }}
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python main.py
 
       - name: Cleanup Firebase on Cancel/Timeout
