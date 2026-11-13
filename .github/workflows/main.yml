@@ -100,8 +100,10 @@ jobs:
 
           # ✅ إعدادات فحص المشاهدين (انتقلت من Apps Script إلى GitHub)
           VIEWER_MIN_THRESHOLD = 100
-          VIEWER_KILL_AFTER_SECONDS = 10 * 60   # نبدأ الفحص بعد 10 دقائق من بداية الجلسة
-          VIEWER_CHECK_INTERVAL_SECONDS = 60    # نفحص كل دقيقة
+          # ⏱️ الفحص يبدأ فوراً ويكرر كل 60 ثانية (لعرض الأرقام في Firebase)
+          VIEWER_CHECK_INTERVAL_SECONDS = 60
+          # ⛔ قرار الإنهاء لا يطبق إلا بعد مرور 10 دقائق من بداية الجلسة
+          VIEWER_KILL_AFTER_SECONDS = 10 * 60
 
           # ✅ heartbeat مستقل للواجهة (watchdog) — مش مربوط بفحص المشاهدين
           HEARTBEAT_INTERVAL_SECONDS = 30
@@ -455,11 +457,12 @@ jobs:
                               except Exception:
                                   pass
 
-                      # ===== ✅ فحص المشاهدين والإعجابات (كل 60 ثانية بعد 10 دقائق من البداية) =====
+                      # ===== ✅ فحص المشاهدين والإعجابات (يبدأ فوراً، كل 60 ثانية) =====
+                      # عرض الأرقام في Firebase يبدأ من أول فحص
+                      # لكن قرار الإنهاء لا يُطبَّق إلا بعد مرور 10 دقائق (VIEWER_KILL_AFTER_SECONDS)
                       elapsed_since_start = now_sec - int(start_time / 1000) if start_time else 0
 
-                      if (session_active and broadcast_id and start_time
-                              and elapsed_since_start >= VIEWER_KILL_AFTER_SECONDS):
+                      if (session_active and broadcast_id and start_time):
 
                           if now_sec - last_viewer_check_ts >= VIEWER_CHECK_INTERVAL_SECONDS:
                               last_viewer_check_ts = now_sec
@@ -468,7 +471,8 @@ jobs:
                               if stats is not None:
                                   viewers = stats["viewers"]
                                   likes = stats["likes"]
-                                  print(f"[viewer-check] viewers={viewers} likes={likes} threshold={VIEWER_MIN_THRESHOLD} elapsed_min={elapsed_since_start//60}")
+                                  kill_enabled = elapsed_since_start >= VIEWER_KILL_AFTER_SECONDS
+                                  print(f"[viewer-check] viewers={viewers} likes={likes} threshold={VIEWER_MIN_THRESHOLD} elapsed_min={elapsed_since_start//60} kill_enabled={kill_enabled}")
 
                                   # ✅ كتابة viewers_count و likes_count في Firebase للواجهة
                                   try:
@@ -479,28 +483,30 @@ jobs:
                                   except Exception as e:
                                       print(f"WARN: patch_firebase stats failed: {e}")
 
-                                  if viewers < VIEWER_MIN_THRESHOLD:
-                                      if low_viewer_streak_start is None:
-                                          low_viewer_streak_start = now_sec
-                                          print("[viewer-check] بدأ تتبع مشاهدين قليلين")
+                                  # ⛔ قرار الإنهاء: فقط بعد 10 دقائق من بداية الجلسة
+                                  if kill_enabled:
+                                      if viewers < VIEWER_MIN_THRESHOLD:
+                                          if low_viewer_streak_start is None:
+                                              low_viewer_streak_start = now_sec
+                                              print("[viewer-check] بدأ تتبع مشاهدين قليلين")
+                                          else:
+                                              streak = now_sec - low_viewer_streak_start
+                                              if streak >= VIEWER_CHECK_INTERVAL_SECONDS:
+                                                  print(f"⛔ [viewer-check] مشاهدين < {VIEWER_MIN_THRESHOLD} لمدة {streak}s — إنهاء الجلسة")
+                                                  try:
+                                                      patch_firebase(username, {
+                                                          "session_active": False,
+                                                          "streaming": False,
+                                                          "viewers_count": 0,
+                                                          "likes_count": 0
+                                                      })
+                                                  except Exception as e:
+                                                      print(f"WARN: patch_firebase failed: {e}")
+                                                  break
                                       else:
-                                          streak = now_sec - low_viewer_streak_start
-                                          if streak >= VIEWER_CHECK_INTERVAL_SECONDS:
-                                              print(f"⛔ [viewer-check] مشاهدين < {VIEWER_MIN_THRESHOLD} لمدة {streak}s — إنهاء الجلسة")
-                                              try:
-                                                  patch_firebase(username, {
-                                                      "session_active": False,
-                                                      "streaming": False,
-                                                      "viewers_count": 0,
-                                                      "likes_count": 0
-                                                  })
-                                              except Exception as e:
-                                                  print(f"WARN: patch_firebase failed: {e}")
-                                              break
-                                  else:
-                                      if low_viewer_streak_start is not None:
-                                          print("[viewer-check] عاد المشاهدون للطبيعي — تصفير العداد")
-                                      low_viewer_streak_start = None
+                                          if low_viewer_streak_start is not None:
+                                              print("[viewer-check] عاد المشاهدون للطبيعي — تصفير العداد")
+                                          low_viewer_streak_start = None
                               else:
                                   print("[viewer-check] فشل جلب الإحصائيات — تخطي هذه الدورة")
 
