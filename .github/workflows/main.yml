@@ -103,6 +103,9 @@ jobs:
           VIEWER_KILL_AFTER_SECONDS = 10 * 60   # نبدأ الفحص بعد 10 دقائق من بداية الجلسة
           VIEWER_CHECK_INTERVAL_SECONDS = 60    # نفحص كل دقيقة
 
+          # ✅ heartbeat مستقل للواجهة (watchdog) — مش مربوط بفحص المشاهدين
+          HEARTBEAT_INTERVAL_SECONDS = 30
+
           # ✅ مفتاح YouTube Data API (من GitHub Secrets)
           YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 
@@ -317,7 +320,8 @@ jobs:
               patch_firebase(username, {
                   "start_time": int(session_loop_start_ts * 1000),
                   "session_duration_minutes": session_duration_minutes,
-                  "session_end_time": int(session_end_ts * 1000)
+                  "session_end_time": int(session_end_ts * 1000),
+                  "viewers_updated_at": int(session_loop_start_ts * 1000)
               })
 
               sink_name = "Sink1"
@@ -394,6 +398,9 @@ jobs:
               low_viewer_streak_start = None
               last_viewer_check_ts = 0
 
+              # ✅ متغير heartbeat مستقل للواجهة (watchdog)
+              last_heartbeat_ts = 0
+
               try:
                   while True:
                       data = get_firebase_data(username)
@@ -416,6 +423,7 @@ jobs:
                       if not session_active: break
 
                       now_ts = time.time()
+                      now_sec = int(now_ts)
 
                       # ✅ الإنهاء الأساسي: عند الوصول لـ session_end_ts (الذي حدده GitHub)
                       if now_ts >= session_end_ts:
@@ -429,8 +437,18 @@ jobs:
                           patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0, "likes_count": 0})
                           break
 
+                      # ===== ✅ heartbeat مستقل للواجهة (كل 30 ثانية) =====
+                      # يعمل دائماً حتى في أول 10 دقائق (قبل بدء فحص المشاهدين)
+                      # ده يحل مشكلة watchdog الواجهة اللي بيعتبر الجلسة "متوقفة" بعد 3 دقايق
+                      if session_active and broadcast_id:
+                          if now_sec - last_heartbeat_ts >= HEARTBEAT_INTERVAL_SECONDS:
+                              last_heartbeat_ts = now_sec
+                              try:
+                                  patch_firebase(username, {"viewers_updated_at": int(now_ts * 1000)})
+                              except Exception:
+                                  pass
+
                       # ===== ✅ فحص المشاهدين (انتقل من Apps Script إلى GitHub) =====
-                      now_sec = int(time.time())
                       elapsed_since_start = now_sec - int(start_time / 1000) if start_time else 0
 
                       if (session_active and broadcast_id and start_time
@@ -441,12 +459,6 @@ jobs:
 
                               viewers = fetch_live_viewers(broadcast_id)
                               print(f"[viewer-check] viewers={viewers} threshold={VIEWER_MIN_THRESHOLD} elapsed_min={elapsed_since_start//60}")
-
-                              # ✅ heartbeat للواجهة (watchdog)
-                              try:
-                                  patch_firebase(username, {"viewers_updated_at": int(time.time() * 1000)})
-                              except Exception:
-                                  pass
 
                               if viewers is not None and viewers < VIEWER_MIN_THRESHOLD:
                                   if low_viewer_streak_start is None:
