@@ -234,32 +234,37 @@ jobs:
               except:
                   return False
 
-          # ✅ جلب عدد المشاهدين مباشرة من YouTube Data API
-          def fetch_live_viewers(broadcast_id):
+          # ✅ جلب عدد المشاهدين + الإعجابات مباشرة من YouTube Data API (استدعاء واحد)
+          def fetch_live_stats(broadcast_id):
+              """يرجع dict فيه viewers و likes، أو None لو فشل."""
               if not broadcast_id or not YOUTUBE_API_KEY:
                   return None
               try:
                   url = (
                       "https://www.googleapis.com/youtube/v3/videos"
-                      "?part=liveStreamingDetails"
+                      "?part=liveStreamingDetails,statistics"
                       "&id=" + urllib.parse.quote(broadcast_id) +
                       "&key=" + urllib.parse.quote(YOUTUBE_API_KEY)
                   )
                   res = requests.get(url, timeout=10)
                   if res.status_code != 200:
-                      print(f"WARN: fetch_live_viewers HTTP {res.status_code}: {res.text[:200]}")
+                      print(f"WARN: fetch_live_stats HTTP {res.status_code}: {res.text[:200]}")
                       return None
                   data = res.json()
                   items = data.get("items", [])
                   if not items:
                       return None
-                  details = items[0].get("liveStreamingDetails", {}) or {}
+                  item = items[0]
+                  details = item.get("liveStreamingDetails", {}) or {}
+                  stats = item.get("statistics", {}) or {}
                   v = details.get("concurrentViewers")
-                  if v is None:
-                      return 0
-                  return int(v)
+                  lk = stats.get("likeCount")
+                  return {
+                      "viewers": int(v) if v is not None else 0,
+                      "likes": int(lk) if lk is not None else 0
+                  }
               except Exception as e:
-                  print(f"WARN: fetch_live_viewers failed: {e}")
+                  print(f"WARN: fetch_live_stats failed: {e}")
                   return None
 
           # ✅ قارئ لوج ffmpeg في thread منفصل (يمنع تجميد الـ main loop)
@@ -321,7 +326,9 @@ jobs:
                   "start_time": int(session_loop_start_ts * 1000),
                   "session_duration_minutes": session_duration_minutes,
                   "session_end_time": int(session_end_ts * 1000),
-                  "viewers_updated_at": int(session_loop_start_ts * 1000)
+                  "viewers_updated_at": int(session_loop_start_ts * 1000),
+                  "viewers_count": 0,
+                  "likes_count": 0
               })
 
               sink_name = "Sink1"
@@ -448,7 +455,7 @@ jobs:
                               except Exception:
                                   pass
 
-                      # ===== ✅ فحص المشاهدين (انتقل من Apps Script إلى GitHub) =====
+                      # ===== ✅ فحص المشاهدين والإعجابات (كل 60 ثانية بعد 10 دقائق من البداية) =====
                       elapsed_since_start = now_sec - int(start_time / 1000) if start_time else 0
 
                       if (session_active and broadcast_id and start_time
@@ -457,31 +464,45 @@ jobs:
                           if now_sec - last_viewer_check_ts >= VIEWER_CHECK_INTERVAL_SECONDS:
                               last_viewer_check_ts = now_sec
 
-                              viewers = fetch_live_viewers(broadcast_id)
-                              print(f"[viewer-check] viewers={viewers} threshold={VIEWER_MIN_THRESHOLD} elapsed_min={elapsed_since_start//60}")
+                              stats = fetch_live_stats(broadcast_id)
+                              if stats is not None:
+                                  viewers = stats["viewers"]
+                                  likes = stats["likes"]
+                                  print(f"[viewer-check] viewers={viewers} likes={likes} threshold={VIEWER_MIN_THRESHOLD} elapsed_min={elapsed_since_start//60}")
 
-                              if viewers is not None and viewers < VIEWER_MIN_THRESHOLD:
-                                  if low_viewer_streak_start is None:
-                                      low_viewer_streak_start = now_sec
-                                      print("[viewer-check] بدأ تتبع مشاهدين قليلين")
+                                  # ✅ كتابة viewers_count و likes_count في Firebase للواجهة
+                                  try:
+                                      patch_firebase(username, {
+                                          "viewers_count": viewers,
+                                          "likes_count": likes
+                                      })
+                                  except Exception as e:
+                                      print(f"WARN: patch_firebase stats failed: {e}")
+
+                                  if viewers < VIEWER_MIN_THRESHOLD:
+                                      if low_viewer_streak_start is None:
+                                          low_viewer_streak_start = now_sec
+                                          print("[viewer-check] بدأ تتبع مشاهدين قليلين")
+                                      else:
+                                          streak = now_sec - low_viewer_streak_start
+                                          if streak >= VIEWER_CHECK_INTERVAL_SECONDS:
+                                              print(f"⛔ [viewer-check] مشاهدين < {VIEWER_MIN_THRESHOLD} لمدة {streak}s — إنهاء الجلسة")
+                                              try:
+                                                  patch_firebase(username, {
+                                                      "session_active": False,
+                                                      "streaming": False,
+                                                      "viewers_count": 0,
+                                                      "likes_count": 0
+                                                  })
+                                              except Exception as e:
+                                                  print(f"WARN: patch_firebase failed: {e}")
+                                              break
                                   else:
-                                      streak = now_sec - low_viewer_streak_start
-                                      if streak >= VIEWER_CHECK_INTERVAL_SECONDS:
-                                          print(f"⛔ [viewer-check] مشاهدين < {VIEWER_MIN_THRESHOLD} لمدة {streak}s — إنهاء الجلسة")
-                                          try:
-                                              patch_firebase(username, {
-                                                  "session_active": False,
-                                                  "streaming": False,
-                                                  "viewers_count": 0,
-                                                  "likes_count": 0
-                                              })
-                                          except Exception as e:
-                                              print(f"WARN: patch_firebase failed: {e}")
-                                          break
+                                      if low_viewer_streak_start is not None:
+                                          print("[viewer-check] عاد المشاهدون للطبيعي — تصفير العداد")
+                                      low_viewer_streak_start = None
                               else:
-                                  if low_viewer_streak_start is not None:
-                                      print("[viewer-check] عاد المشاهدون للطبيعي — تصفير العداد")
-                                  low_viewer_streak_start = None
+                                  print("[viewer-check] فشل جلب الإحصائيات — تخطي هذه الدورة")
 
                       if (session_active and not streaming_active and not auto_start_done and start_time and stream_key):
                           elapsed = (time.time() * 1000) - start_time
