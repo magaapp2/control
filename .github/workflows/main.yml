@@ -287,6 +287,77 @@ jobs:
                   json.dump(prefs, f)
               return profile_dir
 
+          def build_chrome_options():
+              """يبني كائن Options بنفس الإعدادات المستخدمة عند بدء الجلسة."""
+              opts = Options()
+              opts.add_argument('--no-sandbox')
+              opts.add_argument('--disable-dev-shm-usage')
+              opts.add_argument('--autoplay-policy=no-user-gesture-required')
+              opts.add_argument('--window-size=720,1360')
+              opts.add_argument('--start-maximized')
+              opts.add_argument('--disable-infobars')
+              opts.add_argument('--disable-notifications')
+              opts.add_argument('--disable-push-api')
+              opts.add_argument('--disable-desktop-notifications')
+
+              opts.add_argument('--disable-features=TranslateUI,Translate,NotificationTriggers,NotificationIndicator,WebPush,BackgroundFetch,PeriodicBackgroundSync,GlobalMediaControls,MediaRouter')
+              opts.add_argument('--no-default-browser-check')
+              opts.add_argument('--no-first-run')
+              opts.add_argument('--disable-sync')
+
+              prefs = {
+                  "credentials_enable_service": False,
+                  "profile.password_manager_enabled": False,
+                  "profile.default_content_setting_values.notifications": 2,
+                  "bookmark_bar": { "show_on_all_tabs": False }
+              }
+              opts.add_experimental_option("prefs", prefs)
+              opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+              opts.add_experimental_option("useAutomationExtension", False)
+
+              opts.add_argument(f"--user-data-dir={build_chrome_prefs_dir()}")
+              return opts
+
+          def recreate_browser_and_load(game_url):
+              """
+              ✅ يغلق المتصفح القديم فقط (لا يمس FFmpeg أو Xvfb) ثم يفتح متصفحاً جديداً
+              بنفس الإعدادات ويحمّل الرابط الجديد. يعيد كائن driver الجديد.
+              """
+              print(f"🔄 Recreating browser for new URL: {game_url}")
+
+              # 1) إغلاق المتصفح القديم فقط
+              old_driver = GLOBAL_REFS.get("driver")
+              if old_driver:
+                  try:
+                      old_driver.quit()
+                  except Exception as e:
+                      print(f"WARN: old driver quit failed: {e}")
+              GLOBAL_REFS["driver"] = None
+
+              # 2) إنشاء متصفح جديد بنفس الإعدادات
+              new_opts = build_chrome_options()
+              new_driver = webdriver.Chrome(options=new_opts)
+              new_driver.set_window_size(720, 1360)
+              print("OK: New Chrome started")
+
+              try:
+                  new_driver.execute_cdp_cmd("Browser.setPermission", {"permission": {"name": "notifications"}, "setting": "denied", "origin": "*"})
+                  new_driver.execute_cdp_cmd("Page.enable", {})
+              except Exception:
+                  pass
+
+              GLOBAL_REFS["driver"] = new_driver
+
+              # 3) تحميل الرابط الجديد
+              new_driver.get(game_url)
+              print(f"OK: New browser loaded {game_url}")
+
+              # 4) نفس التفاعل التلقائي المستخدم في المسار القديم
+              time.sleep(2)
+              os.system("xdotool key Tab Tab Tab Return")
+
+              return new_driver
+
           def main():
               username = os.environ.get("INPUT_USERNAME")
               if not username:
@@ -485,12 +556,36 @@ jobs:
                               if not is_safe_url(game_url):
                                   print(f"❌ ERROR: Unsafe URL blocked: {game_url}")
                                   continue
-                              
-                              driver.get(game_url)
-                              last_url = game_url
-                              print(f"OK: Loaded game_url: {game_url}")
-                              if not sleep_interruptible(2, username): break
-                              os.system("xdotool key Tab Tab Tab Return")
+
+                              # ✅ التعديل: إعادة إنشاء المتصفح عند تغيير الرابط
+                              try:
+                                  driver = recreate_browser_and_load(game_url)
+                                  last_url = game_url
+                              except Exception as re_err:
+                                  print(f"WARN: recreate_browser_and_load failed: {re_err} — falling back to driver.get()")
+                                  # fallback آمن: لو المتصفح الحالي حي، نستخدمه
+                                  if GLOBAL_REFS.get("driver") is not None:
+                                      driver = GLOBAL_REFS["driver"]
+                                      try:
+                                          driver.get(game_url)
+                                          last_url = game_url
+                                          print(f"OK (fallback): Loaded game_url via existing driver: {game_url}")
+                                          if not sleep_interruptible(2, username): break
+                                          os.system("xdotool key Tab Tab Tab Return")
+                                      except Exception as get_err:
+                                          print(f"WARN: fallback driver.get failed: {get_err}")
+                                  else:
+                                      # المتصفح مات تماماً — نحاول إنشاء واحد احتياطي
+                                      try:
+                                          driver = webdriver.Chrome(options=build_chrome_options())
+                                          driver.set_window_size(720, 1360)
+                                          GLOBAL_REFS["driver"] = driver
+                                          driver.get(game_url)
+                                          last_url = game_url
+                                          print(f"OK (recovery): Created recovery browser and loaded: {game_url}")
+                                      except Exception as rec_err:
+                                          print(f"CRITICAL: Cannot recover browser: {rec_err}")
+
                           except Exception as e:
                               print(f"WARN: Failed to load game_url: {e}")
 
