@@ -112,7 +112,6 @@ jobs:
 
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
-              "fan_process": None,
               "driver": None,
               "disp": None,
               "username": None,
@@ -179,11 +178,10 @@ jobs:
                   print(f"ERROR: Firebase PATCH exception: {e}")
 
           def cleanup_processes():
-              for key in ["fan_process", "ffmpeg_proc"]:
-                  p = GLOBAL_REFS.get(key)
-                  if p:
-                      try: p.terminate()
-                      except: pass
+              p = GLOBAL_REFS.get("ffmpeg_proc")
+              if p:
+                  try: p.terminate()
+                  except: pass
               drv = GLOBAL_REFS.get("driver")
               if drv:
                   try: drv.quit()
@@ -372,36 +370,27 @@ jobs:
               return o
 
           def start_ffmpeg(disp_display, sink_name, stream_key, out_w, out_h, xvfb_w, xvfb_h):
-              fan_cmd = ['ffplay', '-f', 'lavfi', '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', '-nodisp', '-loop', '0', '-loglevel', 'quiet']
-              fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
-              GLOBAL_REFS["fan_process"] = fan_process
-
               ffmpeg_cmd = [
-                  'ffmpeg', '-y',
-                  '-nostats', '-loglevel', 'error',
-                  '-f', 'x11grab',
-                  '-draw_mouse', '0',
-                  '-framerate', '60',
-                  '-video_size', f'{xvfb_w}x{xvfb_h}',
-                  '-i', f":{disp_display}",
-                  '-f', 'pulse',
-                  '-i', f"{sink_name}.monitor",
-                  '-vf', f'scale={out_w}:{out_h}',
-                  '-c:v', 'libx264',
-                  '-preset', 'ultrafast',
-                  '-tune', 'zerolatency',
+                  'ffmpeg', '-y', '-loglevel', 'info',
+                  '-stats', '-stats_period', '10',
+                  '-thread_queue_size', '2048',
+                  '-use_wallclock_as_timestamps', '1',
+                  '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60',
+                  '-video_size', f'{xvfb_w}x{xvfb_h}', '-i', f":{disp_display}",
+                  '-thread_queue_size', '2048',
+                  '-use_wallclock_as_timestamps', '1',
+                  '-f', 'pulse', '-i', f"{sink_name}.monitor",
+                  '-map', '0:v', '-map', '1:a',
+                  '-vf', f'scale={out_w}:{out_h},fps=60',
+                  '-af', 'aresample=async=1000',
+                  '-fps_mode', 'cfr',
+                  '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                   '-x264-params', 'threads=2:sliced-threads=1',
-                  '-max_muxing_queue_size', '1024',
-                  '-b:v', '3000k',
-                  '-maxrate', '3000k',
-                  '-bufsize', '6000k',
-                  '-r', '60',
-                  '-g', '120',
-                  '-keyint_min', '120',
-                  '-sc_threshold', '0',
+                  '-max_muxing_queue_size', '2048',
+                  '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
+                  '-r', '60', '-g', '120', '-keyint_min', '120', '-sc_threshold', '0',
                   '-pix_fmt', 'yuv420p',
-                  '-c:a', 'aac',
-                  '-b:a', '128k',
+                  '-c:a', 'aac', '-b:a', '128k',
                   '-f', 'flv',
                   f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
               ]
@@ -426,12 +415,6 @@ jobs:
                   try: old_ff.terminate()
                   except: pass
               GLOBAL_REFS["ffmpeg_proc"] = None
-
-              old_fan = GLOBAL_REFS.get("fan_process")
-              if old_fan:
-                  try: old_fan.terminate()
-                  except: pass
-              GLOBAL_REFS["fan_process"] = None
 
               old_disp = GLOBAL_REFS.get("disp")
               if old_disp:
@@ -536,7 +519,6 @@ jobs:
 
               GLOBAL_REFS["driver"] = driver
               ffmpeg_proc = None
-              fan_process = None
               last_url = ""
               auto_start_done = False
 
@@ -700,11 +682,6 @@ jobs:
                               except: pass
                               ffmpeg_proc = None
                               GLOBAL_REFS["ffmpeg_proc"] = None
-                              if fan_process:
-                                  try: fan_process.terminate()
-                                  except: pass
-                                  fan_process = None
-                                  GLOBAL_REFS["fan_process"] = None
                       else:
                           if streaming_active and not ffmpeg_proc and stream_key:
                               print("▶️ screen_share_active=false، استئناف بث اللعبة")
@@ -717,15 +694,9 @@ jobs:
                                   xvfb_w=dims["xvfb_w"],
                                   xvfb_h=dims["xvfb_h"],
                               )
-                              fan_process = GLOBAL_REFS.get("fan_process")
 
                       if ffmpeg_proc and ffmpeg_proc.poll() is not None:
                           print(f"ERROR: FFmpeg exited with code {ffmpeg_proc.returncode}")
-                          if fan_process:
-                              try: fan_process.terminate()
-                              except: pass
-                              fan_process = None
-                              GLOBAL_REFS["fan_process"] = None
                           ffmpeg_proc = None
                           GLOBAL_REFS["ffmpeg_proc"] = None
 
@@ -734,9 +705,6 @@ jobs:
               except Exception as e:
                   print(f"ERROR: Main loop exception: {e}")
               finally:
-                  if fan_process:
-                      try: fan_process.terminate()
-                      except: pass
                   if ffmpeg_proc:
                       try: ffmpeg_proc.kill()
                       except: pass
