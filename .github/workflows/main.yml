@@ -46,6 +46,15 @@ jobs:
           version: 1.0
           execute_install_scripts: true
 
+      - name: Override FFmpeg with Static Build
+        run: |
+          wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xf ffmpeg-release-amd64-static.tar.xz
+          sudo cp ffmpeg-*-static/ffmpeg /usr/local/bin/ffmpeg
+          sudo cp ffmpeg-*-static/ffprobe /usr/local/bin/ffprobe
+          sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
+          ffmpeg -version | head -1
+
       - name: Setup Chrome & Notifications
         run: |
           if ! command -v google-chrome-stable &> /dev/null; then
@@ -379,7 +388,7 @@ jobs:
                   '-video_size', f'{xvfb_w}x{xvfb_h}', '-i', f":{disp_display}",
                   '-thread_queue_size', '2048',
                   '-use_wallclock_as_timestamps', '1',
-                  '-f', 'alsa', '-i', 'default',
+                  '-f', 'pulse', '-i', f"{sink_name}.monitor",
                   '-map', '0:v', '-map', '1:a',
                   '-vf', f'scale={out_w}:{out_h},fps=60',
                   '-af', 'aresample=async=1000',
