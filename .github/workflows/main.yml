@@ -42,7 +42,7 @@ jobs:
       - name: Install System Dependencies (Fast Cache)
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11 imagemagick
+          packages: xvfb ffmpeg pulseaudio unclutter xdotool curl dbus dbus-x11
           version: 1.0
           execute_install_scripts: true
 
@@ -63,7 +63,6 @@ jobs:
           mkdir -p ~/.config
           export $(dbus-launch) || true
           
-          # تعطيل خدمة الإشعارات في النظام نهائياً
           systemctl --user mask org.freedesktop.Notifications.service 2>/dev/null || true
           sudo tee /usr/local/bin/notify-send > /dev/null <<'NS'
           #!/bin/sh
@@ -101,19 +100,10 @@ jobs:
           VIEWER_KILL_AFTER_SECONDS = 21 * 60
           HEARTBEAT_INTERVAL_SECONDS = 30
 
-          # ✅ فاصل النقر التلقائي بالماوس في وسط الشاشة
           AUTO_CLICK_INTERVAL_SECONDS = 30
-
-          # ✅ جديد: مدة عرض صورة GIF (عشوائي بين 30 و50 ثانية)
-          GIF_MIN_SECONDS = 30
-          GIF_MAX_SECONDS = 50
-
-          # ✅ جديد: رابط صورة GIF (يمكن تغييره)
-          GIF_URL = "https://www.kapwing.com/resources/content/images/size/w1200/2021/08/twitch-starting-soon-screen-cover.gif"
 
           YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 
-          # ===== إعدادات الاتجاه (بدون قص) =====
           ORIENTATIONS = {
               "portrait":  {"out_w": 720,  "out_h": 1280, "xvfb_w": 720,  "xvfb_h": 1360},
               "landscape": {"out_w": 1280, "out_h": 720,  "xvfb_w": 1280, "xvfb_h": 800},
@@ -127,7 +117,6 @@ jobs:
               "disp": None,
               "username": None,
               "access_token": None,
-              "gif_window": None,   # ✅ نافذة عرض الصورة
           }
 
           def get_access_token():
@@ -202,11 +191,6 @@ jobs:
               dsp = GLOBAL_REFS.get("disp")
               if dsp:
                   try: dsp.stop()
-                  except: pass
-              # ✅ إغلاق نافذة الصورة إن وُجدت
-              gw = GLOBAL_REFS.get("gif_window")
-              if gw:
-                  try: gw.terminate()
                   except: pass
 
           def kill_all(signum, frame):
@@ -311,7 +295,6 @@ jobs:
               return profile_dir
 
           def build_chrome_options(xvfb_w=720, xvfb_h=1360):
-              """يبني كائن Options بنفس الإعدادات المستخدمة عند بدء الجلسة."""
               opts = Options()
               opts.add_argument('--no-sandbox')
               opts.add_argument('--disable-dev-shm-usage')
@@ -342,10 +325,6 @@ jobs:
               return opts
 
           def click_center_of_screen(xvfb_w, xvfb_h):
-              """
-              ينفذ نقرة ماوس يسار واحدة في منتصف الشاشة باستخدام xdotool.
-              يعتمد على متغير DISPLAY الحالي (Xvfb).
-              """
               try:
                   cx = xvfb_w // 2
                   cy = xvfb_h // 2
@@ -354,98 +333,7 @@ jobs:
               except Exception as e:
                   print(f"WARN: click_center_of_screen failed: {e}")
 
-          # ===== ✅ جديد: عرض صورة GIF تملأ الشاشة =====
-          def _download_gif_to_file(dest_path):
-              """ينزل صورة GIF من GIF_URL إلى ملف محلي. يرجع True لو نجح."""
-              try:
-                  r = requests.get(GIF_URL, timeout=15, stream=True)
-                  if r.status_code != 200:
-                      print(f"WARN: GIF download HTTP {r.status_code}")
-                      return False
-                  with open(dest_path, "wb") as f:
-                      for chunk in r.iter_content(8192):
-                          if chunk:
-                              f.write(chunk)
-                  print(f"OK: GIF downloaded to {dest_path}")
-                  return True
-              except Exception as e:
-                  print(f"WARN: GIF download failed: {e}")
-                  return False
-
-          def show_gif_overlay(xvfb_w, xvfb_h, duration_seconds):
-              """
-              يعرض صورة GIF تملأ الشاشة فوق كل شيء لمدة duration_seconds.
-              يستخدم صورة محلية عبر display (ImageMagick) + xdotool لضبط الحجم.
-              ملاحظة: يتم التشغيل في الخلفية (subprocess) ولا يعطل الحلقة.
-              """
-              try:
-                  # 1) نزّل الـ GIF لملف محلي
-                  gif_path = "/tmp/overlay.gif"
-                  if not _download_gif_to_file(gif_path):
-                      print("WARN: GIF overlay skipped (download failed)")
-                      return None
-
-                  # 2) أغلق أي overlay قديم
-                  old_gw = GLOBAL_REFS.get("gif_window")
-                  if old_gw:
-                      try: old_gw.terminate()
-                      except: pass
-                      GLOBAL_REFS["gif_window"] = None
-
-                  # 3) شغّل display في الخلفية (ImageMagick) بملء الشاشة
-                  # -window root: يعرض على الجذر
-                  # -geometry +0+0: من الزاوية العليا اليسرى
-                  # -resize WxH!: يجبر الحجم على ملء الشاشة (بدون الحفاظ على النسبة)
-                  cmd = [
-                      "display",
-                      "-window", "root",
-                      "-geometry", f"+0+0",
-                      "-resize", f"{xvfb_w}x{xvfb_h}!",
-                      "-backdrop",
-                      "-delay", "10",   # سرعة عرض إطارات GIF (10 = 100ms لكل إطار)
-                      gif_path
-                  ]
-                  gw = subprocess.Popen(cmd, env=os.environ.copy())
-                  GLOBAL_REFS["gif_window"] = gw
-                  print(f"OK: GIF overlay shown for {duration_seconds}s (PID={gw.pid})")
-
-                  # 4) انتظر المدة ثم أغلق
-                  def _close_after():
-                      time.sleep(duration_seconds)
-                      try:
-                          if gw.poll() is None:
-                              gw.terminate()
-                      except Exception:
-                          pass
-                      # نظّف الملف
-                      try: os.remove(gif_path)
-                      except Exception: pass
-                      if GLOBAL_REFS.get("gif_window") is gw:
-                          GLOBAL_REFS["gif_window"] = None
-                      print(f"OK: GIF overlay closed after {duration_seconds}s")
-
-                  threading.Thread(target=_close_after, daemon=True).start()
-                  return gw
-              except Exception as e:
-                  print(f"WARN: show_gif_overlay failed: {e}")
-                  return None
-
-          def trigger_gif_overlay(dims, reason=""):
-              """
-              يشغّل صورة GIF عشوائية المدة بين GIF_MIN_SECONDS و GIF_MAX_SECONDS.
-              """
-              try:
-                  duration = random.randint(GIF_MIN_SECONDS, GIF_MAX_SECONDS)
-                  print(f"🎬 GIF overlay triggered ({reason}) for {duration}s")
-                  show_gif_overlay(dims["xvfb_w"], dims["xvfb_h"], duration)
-              except Exception as e:
-                  print(f"WARN: trigger_gif_overlay failed: {e}")
-
           def recreate_browser_and_load(game_url, xvfb_w=720, xvfb_h=1360):
-              """
-              ✅ يغلق المتصفح القديم فقط (لا يمس FFmpeg أو Xvfb) ثم يفتح متصفحاً جديداً
-              بنفس الإعدادات ويحمّل الرابط الجديد. يعيد كائن driver الجديد.
-              """
               print(f"🔄 Recreating browser for new URL: {game_url}")
 
               old_driver = GLOBAL_REFS.get("driver")
@@ -478,14 +366,12 @@ jobs:
               return new_driver
 
           def get_orientation(data):
-              """يرجع اسم الاتجاه الحالي مع التحقق من الصحة."""
               o = (data.get("stream_orientation") or DEFAULT_ORIENTATION).lower()
               if o not in ORIENTATIONS:
                   o = DEFAULT_ORIENTATION
               return o
 
           def start_ffmpeg(disp_display, sink_name, stream_key, out_w, out_h, xvfb_w, xvfb_h):
-              """يشغل ffmpeg بدون أي قص — فقط تحجيم للحجم النهائي، مع إعادة مزامنة الصوت."""
               fan_cmd = ['ffplay', '-f', 'lavfi', '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', '-nodisp', '-loop', '0', '-loglevel', 'quiet']
               fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
               GLOBAL_REFS["fan_process"] = fan_process
@@ -493,21 +379,20 @@ jobs:
               ffmpeg_cmd = [
                   'ffmpeg', '-y', '-loglevel', 'info',
                   '-stats', '-stats_period', '10',
-                  '-thread_queue_size', '1024',
+                  '-thread_queue_size', '2048',
+                  '-use_wallclock_as_timestamps', '1',
                   '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60',
                   '-video_size', f'{xvfb_w}x{xvfb_h}', '-i', f":{disp_display}",
-                  '-thread_queue_size', '1024',
+                  '-thread_queue_size', '2048',
+                  '-use_wallclock_as_timestamps', '1',
                   '-f', 'pulse', '-i', f"{sink_name}.monitor",
                   '-map', '0:v', '-map', '1:a',
-                  # ✅ بدون قص — فقط تحجيم
                   '-vf', f'scale={out_w}:{out_h},fps=60',
-                  # ✅ إعادة مزامنة الصوت تلقائياً (يمنع تأخير الصوت)
                   '-af', 'aresample=async=1:first_pts=0',
-                  # ✅ CFR بدل vsync 1
                   '-vsync', '1',
                   '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                   '-x264-params', 'threads=2:sliced-threads=1',
-                  '-max_muxing_queue_size', '1024',
+                  '-max_muxing_queue_size', '2048',
                   '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
                   '-r', '60', '-g', '120', '-keyint_min', '120', '-sc_threshold', '0',
                   '-pix_fmt', 'yuv420p',
@@ -527,15 +412,10 @@ jobs:
               threading.Thread(target=_ffmpeg_log_reader, args=(proc,), daemon=True).start()
               return proc
 
-          def restart_capture_for_orientation(username, orientation, sink_name, dims_for_gif):
-              """
-              يوقف ffmpeg + Xvfb الحاليين، يشغل Xvfb جديد بالأبعاد الجديدة،
-              يعيد تحميل المتصفح، ثم يشغل ffmpeg من جديد.
-              """
+          def restart_capture_for_orientation(username, orientation, sink_name):
               print(f"🎛️ Switching orientation to: {orientation}")
               dims = ORIENTATIONS[orientation]
 
-              # إيقاف ffmpeg/fan
               old_ff = GLOBAL_REFS.get("ffmpeg_proc")
               if old_ff:
                   try: old_ff.terminate()
@@ -548,24 +428,18 @@ jobs:
                   except: pass
               GLOBAL_REFS["fan_process"] = None
 
-              # إيقاف Xvfb
               old_disp = GLOBAL_REFS.get("disp")
               if old_disp:
                   try: old_disp.stop()
                   except: pass
               GLOBAL_REFS["disp"] = None
 
-              # تشغيل Xvfb جديد
               new_disp = Display(visible=0, size=(dims["xvfb_w"], dims["xvfb_h"]), backend='xvfb')
               new_disp.start()
               GLOBAL_REFS["disp"] = new_disp
               os.environ['DISPLAY'] = f":{new_disp.display}"
               print(f"OK: Xvfb restarted on :{new_disp.display} ({dims['xvfb_w']}x{dims['xvfb_h']})")
 
-              # ✅ عرض GIF عند تغيير الاتجاه
-              trigger_gif_overlay(dims, reason="orientation-change")
-
-              # إعادة تحميل المتصفح
               data = get_firebase_data(username) or {}
               game_url = data.get("game_url", "")
               if game_url:
@@ -574,7 +448,6 @@ jobs:
                   except Exception as e:
                       print(f"WARN: browser reload after orientation change failed: {e}")
 
-              # تشغيل ffmpeg
               stream_key = data.get("stream_key", "")
               if stream_key:
                   ffmpeg_proc = start_ffmpeg(
@@ -620,7 +493,6 @@ jobs:
               os.environ['DBUS_SESSION_BUS_ADDRESS'] = '/dev/null'
               os.environ['NOTIFY_SOCKET'] = '/dev/null'
 
-              # ===== تحديد الاتجاه الأولي من Firebase =====
               initial_data = get_firebase_data(username) or {}
               current_orientation = get_orientation(initial_data)
               dims = ORIENTATIONS[current_orientation]
@@ -666,12 +538,7 @@ jobs:
               low_viewer_streak_start = None
               last_viewer_check_ts = 0
               last_heartbeat_ts = 0
-
-              # ✅ تتبع آخر نقرة ماوس
               last_auto_click_ts = 0
-
-              # ✅ جديد: عرض GIF عند بدء البث
-              trigger_gif_overlay(dims, reason="start-stream")
 
               try:
                   while True:
@@ -688,12 +555,11 @@ jobs:
                       broadcast_id = data.get("broadcast_id", "")
                       screen_share_active = data.get("screen_share_active", False)
 
-                      # ===== التحقق من تغيير الاتجاه =====
                       desired_orientation = get_orientation(data)
                       if desired_orientation != current_orientation:
                           print(f"🎛️ Orientation change requested: {current_orientation} -> {desired_orientation}")
                           try:
-                              ffmpeg_proc, disp = restart_capture_for_orientation(username, desired_orientation, sink_name, dims)
+                              ffmpeg_proc, disp = restart_capture_for_orientation(username, desired_orientation, sink_name)
                               current_orientation = desired_orientation
                               dims = ORIENTATIONS[current_orientation]
                               auto_start_done = True
@@ -712,7 +578,6 @@ jobs:
                       now_ts = time.time()
                       now_sec = int(now_ts)
 
-                      # ===== نقرة ماوس تلقائية كل 30 ثانية =====
                       if now_sec - last_auto_click_ts >= AUTO_CLICK_INTERVAL_SECONDS:
                           last_auto_click_ts = now_sec
                           click_center_of_screen(dims["xvfb_w"], dims["xvfb_h"])
@@ -794,9 +659,6 @@ jobs:
                                   print(f"❌ ERROR: Unsafe URL blocked: {game_url}")
                                   continue
 
-                              # ✅ جديد: عرض GIF عند تغيير الرابط
-                              trigger_gif_overlay(dims, reason="url-change")
-
                               try:
                                   driver = recreate_browser_and_load(game_url, dims["xvfb_w"], dims["xvfb_h"])
                                   last_url = game_url
@@ -826,7 +688,6 @@ jobs:
                           except Exception as e:
                               print(f"WARN: Failed to load game_url: {e}")
 
-                      # ✅ التحكم في ffmpeg بناءً على screen_share_active
                       if screen_share_active:
                           if ffmpeg_proc and ffmpeg_proc.poll() is None:
                               print("⏸️ screen_share_active=true، إيقاف بث اللعبة مؤقتاً")
@@ -877,11 +738,6 @@ jobs:
                   try: driver.quit()
                   except: pass
                   disp.stop()
-                  # ✅ إغلاق نافذة الصورة
-                  gw = GLOBAL_REFS.get("gif_window")
-                  if gw:
-                      try: gw.terminate()
-                      except: pass
                   patch_firebase(username, {"session_active": False, "streaming": False, "viewers_count": 0, "likes_count": 0, "screen_share_active": False})
                   print("=== Session ended ===")
 
