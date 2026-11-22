@@ -103,6 +103,15 @@ jobs:
 
           YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 
+          # ===== إعدادات الاتجاه (بدون قص) =====
+          # xvfb: الحجم الافتراضي لسطح المكتب الافتراضي
+          # out: الحجم النهائي الذي يُرسل إلى YouTube
+          ORIENTATIONS = {
+              "portrait":  {"out_w": 720,  "out_h": 1280, "xvfb_w": 720,  "xvfb_h": 1360},
+              "landscape": {"out_w": 1280, "out_h": 720,  "xvfb_w": 1280, "xvfb_h": 800},
+          }
+          DEFAULT_ORIENTATION = "portrait"
+
           GLOBAL_REFS = {
               "ffmpeg_proc": None,
               "fan_process": None,
@@ -287,13 +296,13 @@ jobs:
                   json.dump(prefs, f)
               return profile_dir
 
-          def build_chrome_options():
+          def build_chrome_options(xvfb_w=720, xvfb_h=1360):
               """يبني كائن Options بنفس الإعدادات المستخدمة عند بدء الجلسة."""
               opts = Options()
               opts.add_argument('--no-sandbox')
               opts.add_argument('--disable-dev-shm-usage')
               opts.add_argument('--autoplay-policy=no-user-gesture-required')
-              opts.add_argument('--window-size=720,1360')
+              opts.add_argument(f'--window-size={xvfb_w},{xvfb_h}')
               opts.add_argument('--start-maximized')
               opts.add_argument('--disable-infobars')
               opts.add_argument('--disable-notifications')
@@ -318,14 +327,13 @@ jobs:
               opts.add_argument(f"--user-data-dir={build_chrome_prefs_dir()}")
               return opts
 
-          def recreate_browser_and_load(game_url):
+          def recreate_browser_and_load(game_url, xvfb_w=720, xvfb_h=1360):
               """
               ✅ يغلق المتصفح القديم فقط (لا يمس FFmpeg أو Xvfb) ثم يفتح متصفحاً جديداً
               بنفس الإعدادات ويحمّل الرابط الجديد. يعيد كائن driver الجديد.
               """
               print(f"🔄 Recreating browser for new URL: {game_url}")
 
-              # 1) إغلاق المتصفح القديم فقط
               old_driver = GLOBAL_REFS.get("driver")
               if old_driver:
                   try:
@@ -334,10 +342,9 @@ jobs:
                       print(f"WARN: old driver quit failed: {e}")
               GLOBAL_REFS["driver"] = None
 
-              # 2) إنشاء متصفح جديد بنفس الإعدادات
-              new_opts = build_chrome_options()
+              new_opts = build_chrome_options(xvfb_w, xvfb_h)
               new_driver = webdriver.Chrome(options=new_opts)
-              new_driver.set_window_size(720, 1360)
+              new_driver.set_window_size(xvfb_w, xvfb_h)
               print("OK: New Chrome started")
 
               try:
@@ -348,15 +355,121 @@ jobs:
 
               GLOBAL_REFS["driver"] = new_driver
 
-              # 3) تحميل الرابط الجديد
               new_driver.get(game_url)
               print(f"OK: New browser loaded {game_url}")
 
-              # 4) نفس التفاعل التلقائي المستخدم في المسار القديم
               time.sleep(2)
               os.system("xdotool key Tab Tab Tab Return")
 
               return new_driver
+
+          def get_orientation(data):
+              """يرجع اسم الاتجاه الحالي مع التحقق من الصحة."""
+              o = (data.get("stream_orientation") or DEFAULT_ORIENTATION).lower()
+              if o not in ORIENTATIONS:
+                  o = DEFAULT_ORIENTATION
+              return o
+
+          def start_ffmpeg(disp_display, sink_name, stream_key, out_w, out_h, xvfb_w, xvfb_h):
+              """يشغل ffmpeg بدون أي قص — فقط تحجيم للحجم النهائي."""
+              fan_cmd = ['ffplay', '-f', 'lavfi', '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', '-nodisp', '-loop', '0', '-loglevel', 'quiet']
+              fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
+              GLOBAL_REFS["fan_process"] = fan_process
+
+              ffmpeg_cmd = [
+                  'ffmpeg', '-y', '-loglevel', 'info',
+                  '-stats', '-stats_period', '10',
+                  '-thread_queue_size', '1024',
+                  '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60',
+                  '-video_size', f'{xvfb_w}x{xvfb_h}', '-i', f":{disp_display}",
+                  '-itsoffset', '0.0',
+                  '-thread_queue_size', '1024',
+                  '-f', 'pulse', '-i', f"{sink_name}.monitor",
+                  '-map', '0:v', '-map', '1:a',
+                  # ✅ بدون قص — فقط تحجيم
+                  '-vf', f'scale={out_w}:{out_h},fps=60',
+                  '-vsync', '1',
+                  '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+                  '-x264-params', 'threads=2:sliced-threads=1',
+                  '-max_muxing_queue_size', '1024',
+                  '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
+                  '-r', '60', '-g', '120', '-keyint_min', '120', '-sc_threshold', '0',
+                  '-pix_fmt', 'yuv420p',
+                  '-c:a', 'aac', '-b:a', '128k',
+                  '-f', 'flv',
+                  f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
+              ]
+              proc = subprocess.Popen(
+                  ffmpeg_cmd,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+                  bufsize=1,
+                  universal_newlines=True
+              )
+              GLOBAL_REFS["ffmpeg_proc"] = proc
+              print(f"OK: FFmpeg PID = {proc.pid} (no crop, out={out_w}x{out_h})")
+              threading.Thread(target=_ffmpeg_log_reader, args=(proc,), daemon=True).start()
+              return proc
+
+          def restart_capture_for_orientation(username, orientation, sink_name):
+              """
+              يوقف ffmpeg + Xvfb الحاليين، يشغل Xvfb جديد بالأبعاد الجديدة،
+              يعيد تحميل المتصفح، ثم يشغل ffmpeg من جديد.
+              """
+              print(f"🎛️ Switching orientation to: {orientation}")
+              dims = ORIENTATIONS[orientation]
+
+              # إيقاف ffmpeg/fan
+              old_ff = GLOBAL_REFS.get("ffmpeg_proc")
+              if old_ff:
+                  try: old_ff.terminate()
+                  except: pass
+              GLOBAL_REFS["ffmpeg_proc"] = None
+
+              old_fan = GLOBAL_REFS.get("fan_process")
+              if old_fan:
+                  try: old_fan.terminate()
+                  except: pass
+              GLOBAL_REFS["fan_process"] = None
+
+              # إيقاف Xvfb
+              old_disp = GLOBAL_REFS.get("disp")
+              if old_disp:
+                  try: old_disp.stop()
+                  except: pass
+              GLOBAL_REFS["disp"] = None
+
+              # تشغيل Xvfb جديد
+              new_disp = Display(visible=0, size=(dims["xvfb_w"], dims["xvfb_h"]), backend='xvfb')
+              new_disp.start()
+              GLOBAL_REFS["disp"] = new_disp
+              os.environ['DISPLAY'] = f":{new_disp.display}"
+              print(f"OK: Xvfb restarted on :{new_disp.display} ({dims['xvfb_w']}x{dims['xvfb_h']})")
+
+              # إعادة تحميل المتصفح
+              data = get_firebase_data(username) or {}
+              game_url = data.get("game_url", "")
+              if game_url:
+                  try:
+                      recreate_browser_and_load(game_url, dims["xvfb_w"], dims["xvfb_h"])
+                  except Exception as e:
+                      print(f"WARN: browser reload after orientation change failed: {e}")
+
+              # تشغيل ffmpeg
+              stream_key = data.get("stream_key", "")
+              if stream_key:
+                  ffmpeg_proc = start_ffmpeg(
+                      disp_display=new_disp.display,
+                      sink_name=sink_name,
+                      stream_key=stream_key,
+                      out_w=dims["out_w"],
+                      out_h=dims["out_h"],
+                      xvfb_w=dims["xvfb_w"],
+                      xvfb_h=dims["xvfb_h"],
+                  )
+                  return ffmpeg_proc, new_disp
+
+              return None, new_disp
 
           def main():
               username = os.environ.get("INPUT_USERNAME")
@@ -388,7 +501,13 @@ jobs:
               os.environ['DBUS_SESSION_BUS_ADDRESS'] = '/dev/null'
               os.environ['NOTIFY_SOCKET'] = '/dev/null'
 
-              disp = Display(visible=0, size=(720, 1360), backend='xvfb')
+              # ===== تحديد الاتجاه الأولي من Firebase =====
+              initial_data = get_firebase_data(username) or {}
+              current_orientation = get_orientation(initial_data)
+              dims = ORIENTATIONS[current_orientation]
+              print(f"📐 Initial orientation: {current_orientation} ({dims['out_w']}x{dims['out_h']})")
+
+              disp = Display(visible=0, size=(dims["xvfb_w"], dims["xvfb_h"]), backend='xvfb')
               disp.start()
               GLOBAL_REFS["disp"] = disp
               os.environ['DISPLAY'] = f":{disp.display}"
@@ -407,36 +526,10 @@ jobs:
 
               subprocess.Popen(['unclutter', '-idle', '0', '-display', f":{disp.display}"])
 
-              opts = Options()
-              opts.add_argument('--no-sandbox')
-              opts.add_argument('--disable-dev-shm-usage')
-              opts.add_argument('--autoplay-policy=no-user-gesture-required')
-              opts.add_argument('--window-size=720,1360')
-              opts.add_argument('--start-maximized')
-              opts.add_argument('--disable-infobars')
-              opts.add_argument('--disable-notifications')
-              opts.add_argument('--disable-push-api')
-              opts.add_argument('--disable-desktop-notifications')
-
-              opts.add_argument('--disable-features=TranslateUI,Translate,NotificationTriggers,NotificationIndicator,WebPush,BackgroundFetch,PeriodicBackgroundSync,GlobalMediaControls,MediaRouter')
-              opts.add_argument('--no-default-browser-check')
-              opts.add_argument('--no-first-run')
-              opts.add_argument('--disable-sync')
-
-              prefs = {
-                  "credentials_enable_service": False,
-                  "profile.password_manager_enabled": False,
-                  "profile.default_content_setting_values.notifications": 2,
-                  "bookmark_bar": { "show_on_all_tabs": False }
-              }
-              opts.add_experimental_option("prefs", prefs)
-              opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-              opts.add_experimental_option("useAutomationExtension", False)
-
-              opts.add_argument(f"--user-data-dir={build_chrome_prefs_dir()}")
+              opts = build_chrome_options(dims["xvfb_w"], dims["xvfb_h"])
 
               driver = webdriver.Chrome(options=opts)
-              driver.set_window_size(720, 1360)
+              driver.set_window_size(dims["xvfb_w"], dims["xvfb_h"])
               print("OK: Chrome started")
 
               try:
@@ -468,11 +561,24 @@ jobs:
                       session_active = data.get("session_active", False)
                       start_time = data.get("start_time", 0)
                       broadcast_id = data.get("broadcast_id", "")
-                      screen_share_active = data.get("screen_share_active", False) # ✅ قراءة الحالة الجديدة
+                      screen_share_active = data.get("screen_share_active", False)
+
+                      # ===== التحقق من تغيير الاتجاه =====
+                      desired_orientation = get_orientation(data)
+                      if desired_orientation != current_orientation:
+                          print(f"🎛️ Orientation change requested: {current_orientation} -> {desired_orientation}")
+                          try:
+                              ffmpeg_proc, disp = restart_capture_for_orientation(username, desired_orientation, sink_name)
+                              current_orientation = desired_orientation
+                              auto_start_done = True  # لتجنب إعادة بدء ffmpeg مرتين
+                              last_url = ""  # لإجبار إعادة تحميل الرابط
+                          except Exception as e:
+                              print(f"ERROR: orientation switch failed: {e}")
+                          continue
 
                       hard_deadline_ts = session_loop_start_ts + SESSION_HARD_LIMIT_SECONDS
 
-                      print(f"STATE: session_active={session_active} streaming={streaming_active} screen_share_active={screen_share_active} stream_key={'YES' if stream_key else 'NO'} game_url={'YES' if game_url else 'NO'} session_end_in_sec={int(session_end_ts - time.time())}")
+                      print(f"STATE: session_active={session_active} streaming={streaming_active} screen_share_active={screen_share_active} stream_key={'YES' if stream_key else 'NO'} game_url={'YES' if game_url else 'NO'} orientation={current_orientation} session_end_in_sec={int(session_end_ts - time.time())}")
 
                       if not session_active:
                           break
@@ -557,13 +663,11 @@ jobs:
                                   print(f"❌ ERROR: Unsafe URL blocked: {game_url}")
                                   continue
 
-                              # ✅ التعديل: إعادة إنشاء المتصفح عند تغيير الرابط
                               try:
-                                  driver = recreate_browser_and_load(game_url)
+                                  driver = recreate_browser_and_load(game_url, dims["xvfb_w"], dims["xvfb_h"])
                                   last_url = game_url
                               except Exception as re_err:
                                   print(f"WARN: recreate_browser_and_load failed: {re_err} — falling back to driver.get()")
-                                  # fallback آمن: لو المتصفح الحالي حي، نستخدمه
                                   if GLOBAL_REFS.get("driver") is not None:
                                       driver = GLOBAL_REFS["driver"]
                                       try:
@@ -575,10 +679,9 @@ jobs:
                                       except Exception as get_err:
                                           print(f"WARN: fallback driver.get failed: {get_err}")
                                   else:
-                                      # المتصفح مات تماماً — نحاول إنشاء واحد احتياطي
                                       try:
-                                          driver = webdriver.Chrome(options=build_chrome_options())
-                                          driver.set_window_size(720, 1360)
+                                          driver = webdriver.Chrome(options=build_chrome_options(dims["xvfb_w"], dims["xvfb_h"]))
+                                          driver.set_window_size(dims["xvfb_w"], dims["xvfb_h"])
                                           GLOBAL_REFS["driver"] = driver
                                           driver.get(game_url)
                                           last_url = game_url
@@ -589,7 +692,7 @@ jobs:
                           except Exception as e:
                               print(f"WARN: Failed to load game_url: {e}")
 
-                      # ✅ التعديل الجذري: التحكم في ffmpeg بناءً على screen_share_active
+                      # ✅ التحكم في ffmpeg بناءً على screen_share_active
                       if screen_share_active:
                           if ffmpeg_proc and ffmpeg_proc.poll() is None:
                               print("⏸️ screen_share_active=true، إيقاف بث اللعبة مؤقتاً")
@@ -605,46 +708,16 @@ jobs:
                       else:
                           if streaming_active and not ffmpeg_proc and stream_key:
                               print("▶️ screen_share_active=false، استئناف بث اللعبة")
-                              fan_cmd = ['ffplay', '-f', 'lavfi', '-i', 'anoisesrc=a=0.08:c=pink,lowpass=f=800', '-nodisp', '-loop', '0', '-loglevel', 'quiet']
-                              fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
-                              GLOBAL_REFS["fan_process"] = fan_process
-
-                              ffmpeg_cmd = [
-                                  'ffmpeg', '-y', '-loglevel', 'info',
-                                  '-stats', '-stats_period', '10',
-                                  '-thread_queue_size', '1024',
-                                  '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60', '-video_size', '720x1360', '-i', f":{disp.display}",
-                                  '-itsoffset', '0.0', 
-                                  '-thread_queue_size', '1024',
-                                  '-f', 'pulse', '-i', f"{sink_name}.monitor",
-                                  '-map', '0:v', '-map', '1:a',
-                                  '-vf', 'crop=720:1200:0:120,scale=720:1280,fps=60',
-                                  '-vsync', '1', 
-                                  '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-                                  '-x264-params', 'threads=2:sliced-threads=1',
-                                  '-max_muxing_queue_size', '1024',
-                                  '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
-                                  '-r', '60', '-g', '120', '-keyint_min', '120', '-sc_threshold', '0',
-                                  '-pix_fmt', 'yuv420p',
-                                  '-c:a', 'aac', '-b:a', '128k',
-                                  '-f', 'flv',
-                                  f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
-                              ]
-                              ffmpeg_proc = subprocess.Popen(
-                                  ffmpeg_cmd,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT,
-                                  bufsize=1,
-                                  universal_newlines=True
+                              ffmpeg_proc = start_ffmpeg(
+                                  disp_display=disp.display,
+                                  sink_name=sink_name,
+                                  stream_key=stream_key,
+                                  out_w=dims["out_w"],
+                                  out_h=dims["out_h"],
+                                  xvfb_w=dims["xvfb_w"],
+                                  xvfb_h=dims["xvfb_h"],
                               )
-                              GLOBAL_REFS["ffmpeg_proc"] = ffmpeg_proc
-                              print(f"OK: FFmpeg PID = {ffmpeg_proc.pid}")
-
-                              threading.Thread(
-                                  target=_ffmpeg_log_reader,
-                                  args=(ffmpeg_proc,),
-                                  daemon=True
-                              ).start()
+                              fan_process = GLOBAL_REFS.get("fan_process")
 
                       if ffmpeg_proc and ffmpeg_proc.poll() is not None:
                           print(f"ERROR: FFmpeg exited with code {ffmpeg_proc.returncode}")
