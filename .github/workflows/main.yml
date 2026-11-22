@@ -101,6 +101,9 @@ jobs:
           VIEWER_KILL_AFTER_SECONDS = 21 * 60
           HEARTBEAT_INTERVAL_SECONDS = 30
 
+          # ✅ جديد: فاصل النقر التلقائي بالماوس في وسط الشاشة
+          AUTO_CLICK_INTERVAL_SECONDS = 30
+
           YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 
           # ===== إعدادات الاتجاه (بدون قص) =====
@@ -327,6 +330,21 @@ jobs:
               opts.add_argument(f"--user-data-dir={build_chrome_prefs_dir()}")
               return opts
 
+          # ===== ✅ جديد: نقرة ماوس في وسط الشاشة =====
+          def click_center_of_screen(xvfb_w, xvfb_h):
+              """
+              ينفذ نقرة ماوس يسار واحدة في منتصف الشاشة باستخدام xdotool.
+              يعتمد على متغير DISPLAY الحالي (Xvfb).
+              """
+              try:
+                  cx = xvfb_w // 2
+                  cy = xvfb_h // 2
+                  # --clearmodifiers لضمان عدم وجود أزرار كيبورد مضغوطة
+                  os.system(f"xdotool mousemove --sync {cx} {cy} click --clearmodifiers 1")
+                  print(f"🖱️ Auto-click at center ({cx},{cy})")
+              except Exception as e:
+                  print(f"WARN: click_center_of_screen failed: {e}")
+
           def recreate_browser_and_load(game_url, xvfb_w=720, xvfb_h=1360):
               """
               ✅ يغلق المتصفح القديم فقط (لا يمس FFmpeg أو Xvfb) ثم يفتح متصفحاً جديداً
@@ -359,7 +377,8 @@ jobs:
               print(f"OK: New browser loaded {game_url}")
 
               time.sleep(2)
-              os.system("xdotool key Tab Tab Tab Return")
+              # ✅ جديد: نقرة ماوس في المنتصف بدل Tab Tab Tab Return
+              click_center_of_screen(xvfb_w, xvfb_h)
 
               return new_driver
 
@@ -548,6 +567,9 @@ jobs:
               last_viewer_check_ts = 0
               last_heartbeat_ts = 0
 
+              # ✅ جديد: تتبع آخر نقرة ماوس
+              last_auto_click_ts = 0
+
               try:
                   while True:
                       data = get_firebase_data(username)
@@ -585,6 +607,11 @@ jobs:
 
                       now_ts = time.time()
                       now_sec = int(now_ts)
+
+                      # ===== ✅ جديد: نقرة ماوس تلقائية كل 30 ثانية في وسط الشاشة =====
+                      if now_sec - last_auto_click_ts >= AUTO_CLICK_INTERVAL_SECONDS:
+                          last_auto_click_ts = now_sec
+                          click_center_of_screen(dims["xvfb_w"], dims["xvfb_h"])
 
                       if now_ts >= session_end_ts:
                           print(f"⏰ Session duration ({session_duration_minutes} min) reached. Stopping stream.")
@@ -675,7 +702,8 @@ jobs:
                                           last_url = game_url
                                           print(f"OK (fallback): Loaded game_url via existing driver: {game_url}")
                                           if not sleep_interruptible(2, username): break
-                                          os.system("xdotool key Tab Tab Tab Return")
+                                          # ✅ جديد: نقرة ماوس في المنتصف بدل Tab Tab Tab Return
+                                          click_center_of_screen(dims["xvfb_w"], dims["xvfb_h"])
                                       except Exception as get_err:
                                           print(f"WARN: fallback driver.get failed: {get_err}")
                                   else:
