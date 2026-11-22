@@ -379,7 +379,7 @@ jobs:
                   '-video_size', f'{xvfb_w}x{xvfb_h}', '-i', f":{disp_display}",
                   '-thread_queue_size', '2048',
                   '-use_wallclock_as_timestamps', '1',
-                  '-f', 'pulse', '-i', f"{sink_name}.monitor",
+                  '-f', 'alsa', '-i', 'default',
                   '-map', '0:v', '-map', '1:a',
                   '-vf', f'scale={out_w}:{out_h},fps=60',
                   '-af', 'aresample=async=1000',
