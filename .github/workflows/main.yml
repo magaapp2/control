@@ -382,7 +382,7 @@ jobs:
                   '-f', 'alsa', '-i', 'default',
                   '-map', '0:v', '-map', '1:a',
                   '-vf', f'scale={out_w}:{out_h},fps=60',
-                  '-af', 'aresample=async=1000',
+                  '-af', 'asetpts=PTS-1.0/TB,aresample=async=1000',
                   '-vsync', '1',
                   '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                   '-x264-params', 'threads=2:sliced-threads=1',
