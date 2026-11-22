@@ -504,7 +504,7 @@ jobs:
                   # ✅ إعادة مزامنة الصوت تلقائياً (يمنع تأخير الصوت)
                   '-af', 'aresample=async=1:first_pts=0',
                   # ✅ CFR بدل vsync 1
-                  '-fps_mode', 'cfr',
+                  '-vsync', '1',
                   '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                   '-x264-params', 'threads=2:sliced-threads=1',
                   '-max_muxing_queue_size', '1024',
