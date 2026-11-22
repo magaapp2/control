@@ -376,20 +376,20 @@ jobs:
               fan_process = subprocess.Popen(fan_cmd, env=os.environ.copy())
               GLOBAL_REFS["fan_process"] = fan_process
 
-              ffmpeg_cmd = [
+                            ffmpeg_cmd = [
                   'ffmpeg', '-y', '-loglevel', 'info',
                   '-stats', '-stats_period', '10',
+                  '-fflags', '+genpts',
                   '-thread_queue_size', '2048',
-                  '-use_wallclock_as_timestamps', '1',
                   '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '60',
                   '-video_size', f'{xvfb_w}x{xvfb_h}', '-i', f":{disp_display}",
                   '-thread_queue_size', '2048',
-                  '-use_wallclock_as_timestamps', '1',
                   '-f', 'pulse', '-i', f"{sink_name}.monitor",
                   '-map', '0:v', '-map', '1:a',
                   '-vf', f'scale={out_w}:{out_h},fps=60',
-                  '-af', 'aresample=async=1:first_pts=0',
                   '-vsync', '1',
+                  '-copyts',
+                  '-start_at_zero',
                   '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
                   '-x264-params', 'threads=2:sliced-threads=1',
                   '-max_muxing_queue_size', '2048',
